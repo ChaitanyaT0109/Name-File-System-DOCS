@@ -1,0 +1,494 @@
+/*
+ * client/client.c
+ * 
+ * Client - Interactive terminal interface for Docs++ system
+ * Connects to Name Server and performs file operations
+ * 
+ * Day 2 Implementation: CREATE and READ operations
+ * 
+ * Compile: gcc -o client client.c ../common/socket_utils.c ../common/logger.c -I../common
+ * Run: ./client
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <ctype.h>
+#include "socket_utils.h"
+#include "logger.h"
+#include "protocol.h"
+
+#define NS_IP "127.0.0.1"
+#define NS_PORT 8080
+#define MAX_INPUT 1024
+
+// Global state
+char current_username[MAX_USERNAME_LEN];
+char local_ip[MAX_IP_LEN];
+
+/* ============================================================================
+ * UTILITY FUNCTIONS
+ * ============================================================================ */
+
+// Trim whitespace from string
+void trim(char* str) {
+    char* start = str;
+    char* end;
+    
+    // Trim leading space
+    while (isspace((unsigned char)*start)) start++;
+    
+    // All spaces?
+    if (*start == 0) {
+        *str = 0;
+        return;
+    }
+    
+    // Trim trailing space
+    end = start + strlen(start) - 1;
+    while (end > start && isspace((unsigned char)*end)) end--;
+    
+    // Write new null terminator
+    end[1] = '\0';
+    
+    // Move trimmed string to start
+    memmove(str, start, end - start + 2);
+}
+
+// Parse command line input
+int parse_input(char* input, char* command, char* arg1, char* arg2) {
+    command[0] = '\0';
+    arg1[0] = '\0';
+    arg2[0] = '\0';
+    
+    trim(input);
+    
+    // Get command
+    char* token = strtok(input, " ");
+    if (token == NULL) return 0;
+    
+    strncpy(command, token, MAX_FILENAME_LEN - 1);
+    command[MAX_FILENAME_LEN - 1] = '\0';
+    
+    // Convert to uppercase
+    for (int i = 0; command[i]; i++) {
+        command[i] = toupper(command[i]);
+    }
+    
+    // Get first argument
+    token = strtok(NULL, " ");
+    if (token != NULL) {
+        strncpy(arg1, token, MAX_FILENAME_LEN - 1);
+        arg1[MAX_FILENAME_LEN - 1] = '\0';
+    }
+    
+    // Get second argument
+    token = strtok(NULL, " ");
+    if (token != NULL) {
+        strncpy(arg2, token, MAX_FILENAME_LEN - 1);
+        arg2[MAX_FILENAME_LEN - 1] = '\0';
+    }
+    
+    return 1;
+}
+
+/* ============================================================================
+ * REGISTRATION
+ * ============================================================================ */
+
+int register_with_nameserver() {
+    log_info("Registering with Name Server at %s:%d", NS_IP, NS_PORT);
+    
+    // Create socket
+    int ns_socket = create_socket();
+    if (ns_socket < 0) {
+        printf("Error: Failed to create socket\n");
+        return -1;
+    }
+    
+    // Connect to NS
+    if (connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server at %s:%d\n", NS_IP, NS_PORT);
+        printf("Make sure Name Server is running!\n");
+        close_socket(ns_socket);
+        return -1;
+    }
+    
+    log_info("Connected to Name Server");
+    
+    // Send registration
+    Message reg_msg;
+    INIT_MESSAGE(reg_msg);
+    reg_msg.operation = OP_REGISTER_CLIENT;
+    strncpy(reg_msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(reg_msg.ip_address, local_ip, MAX_IP_LEN - 1);
+    reg_msg.nm_port = 0;  // Client doesn't listen
+    
+    if (send_message(ns_socket, &reg_msg) < 0) {
+        printf("Error: Failed to send registration\n");
+        close_socket(ns_socket);
+        return -1;
+    }
+    
+    // Wait for ACK
+    Message ack;
+    if (receive_message(ns_socket, &ack) <= 0) {
+        printf("Error: Failed to receive registration response\n");
+        close_socket(ns_socket);
+        return -1;
+    }
+    
+    if (ack.error_code != ERR_SUCCESS) {
+        printf("Error: Registration failed: %s\n", ack.content);
+        close_socket(ns_socket);
+        return -1;
+    }
+    
+    printf("%s\n", ack.content);
+    log_info("Registration successful");
+    
+    close_socket(ns_socket);
+    return 0;
+}
+
+/* ============================================================================
+ * COMMAND HANDLERS
+ * ============================================================================ */
+
+void cmd_create(const char* filename) {
+    if (strlen(filename) == 0) {
+        printf("Usage: CREATE <filename>\n");
+        return;
+    }
+    
+    log_info("CREATE command: %s", filename);
+    
+    // Connect to NS
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Cannot connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    // Send CREATE request
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_CREATE;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    if (send_message(ns_socket, &msg) < 0) {
+        printf("Error: Failed to send CREATE request\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    log_info("Sent CREATE request to NS");
+    
+    // Wait for response
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    // Display result
+    if (response.error_code == ERR_SUCCESS || response.error_code == ERR_CREATED) {
+        printf("✓ File '%s' created successfully!\n", filename);
+        log_info("CREATE successful");
+    } else {
+        printf("✗ Error: %s\n", response.content);
+        log_error("CREATE failed: %s", get_error_message(response.error_code));
+    }
+    
+    close_socket(ns_socket);
+}
+
+void cmd_read(const char* filename) {
+    if (strlen(filename) == 0) {
+        printf("Usage: READ <filename>\n");
+        return;
+    }
+    
+    log_info("READ command: %s", filename);
+    
+    // Connect to NS
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Cannot connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    // Send READ request
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_READ;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    if (send_message(ns_socket, &msg) < 0) {
+        printf("Error: Failed to send READ request\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    log_info("Sent READ request to NS");
+    
+    // Wait for routing info from NS
+    Message route_response;
+    if (receive_message(ns_socket, &route_response) <= 0) {
+        printf("Error: Failed to receive routing info\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    // Check if NS returned error
+    if (route_response.operation != OP_ROUTE_INFO) {
+        printf("✗ Error: %s\n", route_response.content);
+        log_error("READ failed: %s", get_error_message(route_response.error_code));
+        return;
+    }
+    
+    // Extract SS info
+    char ss_ip[MAX_IP_LEN];
+    int ss_port;
+    strncpy(ss_ip, route_response.ss_ip, MAX_IP_LEN - 1);
+    ss_ip[MAX_IP_LEN - 1] = '\0';
+    ss_port = route_response.ss_port;
+    
+    log_info("Connecting to Storage Server at %s:%d", ss_ip, ss_port);
+    
+    // Connect directly to SS
+    int ss_socket = create_socket();
+    if (ss_socket < 0 || connect_to_server(ss_socket, ss_ip, ss_port) < 0) {
+        printf("Error: Cannot connect to Storage Server\n");
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    log_info("Connected to Storage Server");
+    
+    // Send READ request to SS
+    Message ss_msg;
+    INIT_MESSAGE(ss_msg);
+    ss_msg.operation = OP_READ;
+    strncpy(ss_msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(ss_msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    if (send_message(ss_socket, &ss_msg) < 0) {
+        printf("Error: Failed to send READ request to Storage Server\n");
+        close_socket(ss_socket);
+        return;
+    }
+    
+    // Receive file content from SS
+    Message ss_response;
+    if (receive_message(ss_socket, &ss_response) <= 0) {
+        printf("Error: Failed to receive file content\n");
+        close_socket(ss_socket);
+        return;
+    }
+    
+    // Check for errors
+    if (ss_response.error_code != ERR_SUCCESS) {
+        printf("✗ Error: %s\n", ss_response.content);
+        log_error("READ failed: %s", get_error_message(ss_response.error_code));
+        close_socket(ss_socket);
+        return;
+    }
+    
+    // Display file content
+    printf("\n");
+    printf("─────────────────────────────────────────────────────────────\n");
+    printf("File: %s\n", filename);
+    printf("─────────────────────────────────────────────────────────────\n");
+    
+    if (strlen(ss_response.content) == 0) {
+        printf("(empty file)\n");
+    } else {
+        printf("%s\n", ss_response.content);
+    }
+    
+    printf("─────────────────────────────────────────────────────────────\n");
+    printf("\n");
+    
+    log_info("READ successful");
+    
+    // Wait for STOP packet
+    Message stop;
+    receive_message(ss_socket, &stop);
+    
+    close_socket(ss_socket);
+}
+
+void cmd_delete(const char* filename) {
+    if (strlen(filename) == 0) {
+        printf("Usage: DELETE <filename>\n");
+        return;
+    }
+    
+    log_info("DELETE command: %s", filename);
+    
+    // Connect to NS
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Cannot connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    // Send DELETE request
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_DELETE;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    if (send_message(ns_socket, &msg) < 0) {
+        printf("Error: Failed to send DELETE request\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    log_info("Sent DELETE request to NS");
+    
+    // Wait for response
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    // Display result
+    if (response.error_code == ERR_SUCCESS) {
+        printf("✓ File '%s' deleted successfully!\n", filename);
+        log_info("DELETE successful");
+    } else {
+        printf("✗ Error: %s\n", response.content);
+        log_error("DELETE failed: %s", get_error_message(response.error_code));
+    }
+    
+    close_socket(ns_socket);
+}
+
+void cmd_help() {
+    printf("\n");
+    printf("Available Commands:\n");
+    printf("══════════════════════════════════════════════════════════════\n");
+    printf("  CREATE <filename>       - Create a new file\n");
+    printf("  READ <filename>         - Read and display file content\n");
+    printf("  DELETE <filename>       - Delete a file\n");
+    printf("  HELP                    - Show this help message\n");
+    printf("  EXIT                    - Exit the client\n");
+    printf("══════════════════════════════════════════════════════════════\n");
+    printf("\n");
+    printf("Examples:\n");
+    printf("  CREATE test.txt\n");
+    printf("  READ test.txt\n");
+    printf("  DELETE test.txt\n");
+    printf("\n");
+}
+
+/* ============================================================================
+ * MAIN
+ * ============================================================================ */
+
+int main() {
+    // Initialize logger
+    init_logger("CLIENT", "logs/client.log");
+    
+    // Display banner
+    printf("\n");
+    printf("╔════════════════════════════════════════════════════════════╗\n");
+    printf("║                    Docs++ Client                           ║\n");
+    printf("║         Distributed Document Collaboration System          ║\n");
+    printf("╚════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
+    
+    // Get username
+    printf("Enter your username: ");
+    fflush(stdout);
+    
+    if (fgets(current_username, sizeof(current_username), stdin) == NULL) {
+        printf("Error reading username\n");
+        return 1;
+    }
+    
+    trim(current_username);
+    
+    if (strlen(current_username) == 0) {
+        printf("Error: Username cannot be empty\n");
+        return 1;
+    }
+    
+    log_info("User logged in: %s", current_username);
+    
+    // Get local IP
+    get_local_ip(local_ip);
+    
+    // Register with NS
+    printf("Connecting to Name Server...\n");
+    if (register_with_nameserver() < 0) {
+        printf("Failed to connect to Name Server. Exiting.\n");
+        close_logger();
+        return 1;
+    }
+    
+    printf("\n");
+    printf("Type 'HELP' for list of commands\n");
+    printf("\n");
+    
+    // Main command loop
+    char input[MAX_INPUT];
+    char command[MAX_FILENAME_LEN];
+    char arg1[MAX_FILENAME_LEN];
+    char arg2[MAX_FILENAME_LEN];
+    
+    while (1) {
+        printf("docs++> ");
+        fflush(stdout);
+        
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            break;
+        }
+        
+        // Parse input
+        if (!parse_input(input, command, arg1, arg2)) {
+            continue;
+        }
+        
+        if (strlen(command) == 0) {
+            continue;
+        }
+        
+        // Handle commands
+        if (strcmp(command, "CREATE") == 0) {
+            cmd_create(arg1);
+        } else if (strcmp(command, "READ") == 0) {
+            cmd_read(arg1);
+        } else if (strcmp(command, "DELETE") == 0) {
+            cmd_delete(arg1);
+        } else if (strcmp(command, "HELP") == 0) {
+            cmd_help();
+        } else if (strcmp(command, "EXIT") == 0 || strcmp(command, "QUIT") == 0) {
+            printf("Goodbye, %s!\n", current_username);
+            log_info("User logged out: %s", current_username);
+            break;
+        } else {
+            printf("Unknown command: %s\n", command);
+            printf("Type 'HELP' for list of commands\n");
+        }
+        
+        printf("\n");
+    }
+    
+    close_logger();
+    return 0;
+}
