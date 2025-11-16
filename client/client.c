@@ -4,7 +4,9 @@
  * Client - Interactive terminal interface for Docs++ system
  * Connects to Name Server and performs file operations
  * 
- * Day 2 Implementation: CREATE and READ operations
+ * Implemented Features:
+ * - Days 3-5: CREATE, READ, DELETE operations
+ * - Days 6-7: VIEW, INFO, LIST, ADDACCESS, REMACCESS commands
  * 
  * Compile: gcc -o client client.c ../common/socket_utils.c ../common/logger.c -I../common
  * Run: ./client
@@ -56,11 +58,12 @@ void trim(char* str) {
     memmove(str, start, end - start + 2);
 }
 
-// Parse command line input
-int parse_input(char* input, char* command, char* arg1, char* arg2) {
+// Parse command line input (now supports up to 3 arguments for ADDACCESS)
+int parse_input(char* input, char* command, char* arg1, char* arg2, char* arg3) {
     command[0] = '\0';
     arg1[0] = '\0';
     arg2[0] = '\0';
+    arg3[0] = '\0';
     
     trim(input);
     
@@ -88,6 +91,13 @@ int parse_input(char* input, char* command, char* arg1, char* arg2) {
     if (token != NULL) {
         strncpy(arg2, token, MAX_FILENAME_LEN - 1);
         arg2[MAX_FILENAME_LEN - 1] = '\0';
+    }
+    
+    // Get third argument (for ADDACCESS)
+    token = strtok(NULL, " ");
+    if (token != NULL) {
+        strncpy(arg3, token, MAX_FILENAME_LEN - 1);
+        arg3[MAX_FILENAME_LEN - 1] = '\0';
     }
     
     return 1;
@@ -378,21 +388,303 @@ void cmd_delete(const char* filename) {
     close_socket(ns_socket);
 }
 
+void cmd_list() {
+    log_info("LIST command");
+    
+    // Connect to NS
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Cannot connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    // Send LIST request
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_LIST;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    
+    if (send_message(ns_socket, &msg) < 0) {
+        printf("Error: Failed to send LIST request\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    // Wait for response
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    // Display result
+    if (response.error_code == ERR_SUCCESS) {
+        printf("\n%s\n", response.content);
+        log_info("LIST successful");
+    } else {
+        printf("✗ Error: %s\n", response.content);
+        log_error("LIST failed: %s", get_error_message(response.error_code));
+    }
+    
+    close_socket(ns_socket);
+}
+
+void cmd_view(const char* flags) {
+    log_info("VIEW command with flags: %s", flags);
+    
+    // Connect to NS
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Cannot connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    // Send VIEW request
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_VIEW;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    
+    // Parse flags
+    msg.view_flags = VIEW_FLAG_NONE;
+    if (strlen(flags) > 0) {
+        if (strcmp(flags, "-a") == 0) {
+            msg.view_flags = VIEW_FLAG_ALL;
+        } else if (strcmp(flags, "-l") == 0) {
+            msg.view_flags = VIEW_FLAG_LONG;
+        } else if (strcmp(flags, "-al") == 0 || strcmp(flags, "-la") == 0) {
+            msg.view_flags = VIEW_FLAG_ALL_LONG;
+        }
+    }
+    
+    if (send_message(ns_socket, &msg) < 0) {
+        printf("Error: Failed to send VIEW request\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    // Wait for response
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    // Display result
+    if (response.error_code == ERR_SUCCESS) {
+        printf("\n%s\n", response.content);
+        log_info("VIEW successful");
+    } else {
+        printf("✗ Error: %s\n", response.content);
+        log_error("VIEW failed: %s", get_error_message(response.error_code));
+    }
+    
+    close_socket(ns_socket);
+}
+
+void cmd_info(const char* filename) {
+    if (strlen(filename) == 0) {
+        printf("Usage: INFO <filename>\n");
+        return;
+    }
+    
+    log_info("INFO command: %s", filename);
+    
+    // Connect to NS
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Cannot connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    // Send INFO request
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_INFO;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    if (send_message(ns_socket, &msg) < 0) {
+        printf("Error: Failed to send INFO request\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    // Wait for response
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    // Display result
+    if (response.error_code == ERR_SUCCESS) {
+        printf("\n%s\n", response.content);
+        log_info("INFO successful");
+    } else {
+        printf("✗ Error: %s\n", response.content);
+        log_error("INFO failed: %s", get_error_message(response.error_code));
+    }
+    
+    close_socket(ns_socket);
+}
+
+void cmd_addaccess(const char* flag, const char* filename, const char* username) {
+    if (strlen(flag) == 0 || strlen(filename) == 0 || strlen(username) == 0) {
+        printf("Usage: ADDACCESS -R|-W <filename> <username>\n");
+        printf("  -R : Grant read access\n");
+        printf("  -W : Grant write access\n");
+        return;
+    }
+    
+    // Parse access type
+    int access_type;
+    if (strcmp(flag, "-R") == 0 || strcmp(flag, "-r") == 0) {
+        access_type = ACCESS_READ;
+    } else if (strcmp(flag, "-W") == 0 || strcmp(flag, "-w") == 0) {
+        access_type = ACCESS_WRITE;
+    } else {
+        printf("Error: Invalid flag '%s'. Use -R for read or -W for write\n", flag);
+        return;
+    }
+    
+    log_info("ADDACCESS command: %s %s to %s", flag, filename, username);
+    
+    // Connect to NS
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Cannot connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    // Send ADDACCESS request
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_ADDACCESS;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    strncpy(msg.target_user, username, MAX_USERNAME_LEN - 1);
+    msg.access_type = access_type;
+    
+    if (send_message(ns_socket, &msg) < 0) {
+        printf("Error: Failed to send ADDACCESS request\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    // Wait for response
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    // Display result
+    if (response.error_code == ERR_SUCCESS) {
+        printf("✓ %s\n", response.content);
+        log_info("ADDACCESS successful");
+    } else {
+        printf("✗ Error: %s\n", response.content);
+        log_error("ADDACCESS failed: %s", get_error_message(response.error_code));
+    }
+    
+    close_socket(ns_socket);
+}
+
+void cmd_remaccess(const char* filename, const char* username) {
+    if (strlen(filename) == 0 || strlen(username) == 0) {
+        printf("Usage: REMACCESS <filename> <username>\n");
+        return;
+    }
+    
+    log_info("REMACCESS command: %s for %s", filename, username);
+    
+    // Connect to NS
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Cannot connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    // Send REMACCESS request
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_REMACCESS;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    strncpy(msg.target_user, username, MAX_USERNAME_LEN - 1);
+    
+    if (send_message(ns_socket, &msg) < 0) {
+        printf("Error: Failed to send REMACCESS request\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    // Wait for response
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    // Display result
+    if (response.error_code == ERR_SUCCESS) {
+        printf("✓ %s\n", response.content);
+        log_info("REMACCESS successful");
+    } else {
+        printf("✗ Error: %s\n", response.content);
+        log_error("REMACCESS failed: %s", get_error_message(response.error_code));
+    }
+    
+    close_socket(ns_socket);
+}
+
 void cmd_help() {
     printf("\n");
     printf("Available Commands:\n");
-    printf("══════════════════════════════════════════════════════════════\n");
-    printf("  CREATE <filename>       - Create a new file\n");
-    printf("  READ <filename>         - Read and display file content\n");
-    printf("  DELETE <filename>       - Delete a file\n");
-    printf("  HELP                    - Show this help message\n");
-    printf("  EXIT                    - Exit the client\n");
-    printf("══════════════════════════════════════════════════════════════\n");
+    printf("════════════════════════════════════════════════════════════════════════\n");
+    printf("  File Operations:\n");
+    printf("    CREATE <filename>                - Create a new file\n");
+    printf("    READ <filename>                  - Read and display file content\n");
+    printf("    DELETE <filename>                - Delete a file\n");
+    printf("\n");
+    printf("  File Information:\n");
+    printf("    VIEW                             - List files you can access\n");
+    printf("    VIEW -a                          - List all files in system\n");
+    printf("    VIEW -l                          - List accessible files with details\n");
+    printf("    VIEW -al                         - List all files with details\n");
+    printf("    INFO <filename>                  - Show detailed file information\n");
+    printf("\n");
+    printf("  Access Control:\n");
+    printf("    ADDACCESS -R <filename> <user>   - Grant read access to user\n");
+    printf("    ADDACCESS -W <filename> <user>   - Grant write access to user\n");
+    printf("    REMACCESS <filename> <user>      - Revoke all access from user\n");
+    printf("\n");
+    printf("  User Management:\n");
+    printf("    LIST                             - Show all registered users\n");
+    printf("\n");
+    printf("  General:\n");
+    printf("    HELP                             - Show this help message\n");
+    printf("    EXIT                             - Exit the client\n");
+    printf("════════════════════════════════════════════════════════════════════════\n");
     printf("\n");
     printf("Examples:\n");
-    printf("  CREATE test.txt\n");
-    printf("  READ test.txt\n");
-    printf("  DELETE test.txt\n");
+    printf("  CREATE mydoc.txt\n");
+    printf("  READ mydoc.txt\n");
+    printf("  VIEW -l\n");
+    printf("  INFO mydoc.txt\n");
+    printf("  ADDACCESS -R mydoc.txt alice\n");
+    printf("  LIST\n");
     printf("\n");
 }
 
@@ -450,6 +742,7 @@ int main() {
     char command[MAX_FILENAME_LEN];
     char arg1[MAX_FILENAME_LEN];
     char arg2[MAX_FILENAME_LEN];
+    char arg3[MAX_FILENAME_LEN];
     
     while (1) {
         printf("docs++> ");
@@ -460,7 +753,7 @@ int main() {
         }
         
         // Parse input
-        if (!parse_input(input, command, arg1, arg2)) {
+        if (!parse_input(input, command, arg1, arg2, arg3)) {
             continue;
         }
         
@@ -475,6 +768,16 @@ int main() {
             cmd_read(arg1);
         } else if (strcmp(command, "DELETE") == 0) {
             cmd_delete(arg1);
+        } else if (strcmp(command, "LIST") == 0) {
+            cmd_list();
+        } else if (strcmp(command, "VIEW") == 0) {
+            cmd_view(arg1);
+        } else if (strcmp(command, "INFO") == 0) {
+            cmd_info(arg1);
+        } else if (strcmp(command, "ADDACCESS") == 0) {
+            cmd_addaccess(arg1, arg2, arg3);
+        } else if (strcmp(command, "REMACCESS") == 0) {
+            cmd_remaccess(arg1, arg2);
         } else if (strcmp(command, "HELP") == 0) {
             cmd_help();
         } else if (strcmp(command, "EXIT") == 0 || strcmp(command, "QUIT") == 0) {

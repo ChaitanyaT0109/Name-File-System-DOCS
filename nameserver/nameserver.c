@@ -16,11 +16,13 @@
 #include "socket_utils.h"
 #include "logger.h"
 #include "protocol.h"
+#include "acl.h"
 
 #define NS_PORT 8080
 #define MAX_CONNECTIONS 50
 #define MAX_FILES 1000
 #define HASH_TABLE_SIZE 1009  // Prime number for better distribution
+#define ACL_DATA_FILE "acl_data.db"  // Persistent ACL storage
 
 /* ============================================================================
  * EXTENDED STORAGE SERVER INFO (add files list)
@@ -50,6 +52,12 @@ typedef struct {
 HashMap file_map;
 
 /* ============================================================================
+ * ACCESS CONTROL LIST (ACL)
+ * ============================================================================ */
+
+AclTable acl_table;
+
+/* ============================================================================
  * GLOBAL REGISTRY (Original code retained)
  * ============================================================================ */
 
@@ -75,6 +83,17 @@ void init_registries() {
         file_map.buckets[i] = NULL;
     }
     file_map.size = 0;
+    
+    // Initialize ACL
+    acl_init(&acl_table);
+    
+    // Try to load ACL from persistent storage
+    if (acl_load(&acl_table, ACL_DATA_FILE) == 0) {
+        log_info("ACL data loaded from %s", ACL_DATA_FILE);
+        acl_stats(&acl_table);
+    } else {
+        log_info("Starting with empty ACL (no saved data)");
+    }
 }
 
 /* ============================================================================
@@ -446,6 +465,14 @@ void handle_create_request(int client_socket, Message* msg) {
     
     if (ss_response.error_code == ERR_SUCCESS || ss_response.error_code == ERR_CREATED) {
         add_file_to_ss(ss_index, msg->filename);
+        
+        // Add to ACL with creator as owner
+        if (acl_add_file(&acl_table, msg->filename, msg->sender_id) == 0) {
+            log_info("File '%s' added to ACL with owner '%s'", msg->filename, msg->sender_id);
+            // Persist ACL changes
+            acl_save(&acl_table, ACL_DATA_FILE);
+        }
+        
         log_info("File '%s' created successfully on SS[%d]", msg->filename, ss_index);
     }
     
@@ -455,6 +482,7 @@ void handle_create_request(int client_socket, Message* msg) {
 void handle_read_request(int client_socket, Message* msg) {
     log_info("READ request from %s for file '%s'", msg->sender_id, msg->filename);
     
+    // FIRST: Check if file exists (before checking permissions)
     int ss_index = find_ss_for_file(msg->filename);
     if (ss_index < 0) {
         log_warning("File '%s' not found", msg->filename);
@@ -464,6 +492,19 @@ void handle_read_request(int client_socket, Message* msg) {
         response.error_code = ERR_NOT_FOUND;
         snprintf(response.content, sizeof(response.content), 
                  "File '%s' not found", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // SECOND: Check if user has read access
+    if (!acl_check_read(&acl_table, msg->filename, msg->sender_id)) {
+        log_warning("Access denied: %s attempted to read '%s'", msg->sender_id, msg->filename);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_ACCESS_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                 "Access denied: You don't have permission to read '%s'", msg->filename);
         send_message(client_socket, &response);
         return;
     }
@@ -487,6 +528,19 @@ void handle_read_request(int client_socket, Message* msg) {
 
 void handle_delete_request(int client_socket, Message* msg) {
     log_info("DELETE request from %s for file '%s'", msg->sender_id, msg->filename);
+    
+    // Check if user has write access (needed for delete)
+    if (!acl_check_write(&acl_table, msg->filename, msg->sender_id)) {
+        log_warning("Access denied: %s attempted to delete '%s'", msg->sender_id, msg->filename);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_ACCESS_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                 "Access denied: You don't have permission to delete '%s'", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
     
     int ss_index = find_ss_for_file(msg->filename);
     if (ss_index < 0) {
@@ -549,6 +603,13 @@ void handle_delete_request(int client_socket, Message* msg) {
         // Remove from HashMap
         hashmap_remove(msg->filename);
         
+        // Remove from ACL
+        if (acl_remove_file(&acl_table, msg->filename) == 0) {
+            log_info("Removed file '%s' from ACL", msg->filename);
+            // Persist ACL changes
+            acl_save(&acl_table, ACL_DATA_FILE);
+        }
+        
         // Remove from SS's file list
         for (int i = 0; i < storage_servers[ss_index].file_count; i++) {
             if (strcmp(storage_servers[ss_index].files[i], msg->filename) == 0) {
@@ -564,6 +625,354 @@ void handle_delete_request(int client_socket, Message* msg) {
     }
     
     send_message(client_socket, &ss_response);
+}
+
+/* ============================================================================
+ * ACCESS CONTROL COMMAND HANDLERS
+ * ============================================================================ */
+
+void handle_addaccess_request(int client_socket, Message* msg) {
+    log_info("ADDACCESS request from %s for file '%s', target user '%s', access type %d",
+             msg->sender_id, msg->filename, msg->target_user, msg->access_type);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    // Check if requester is the owner
+    if (!acl_check_owner(&acl_table, msg->filename, msg->sender_id)) {
+        log_warning("Access denied: %s is not owner of '%s'", msg->sender_id, msg->filename);
+        response.error_code = ERR_ACCESS_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                 "Access denied: Only the owner can grant access to '%s'", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Validate access type
+    if (msg->access_type != ACCESS_READ && msg->access_type != ACCESS_WRITE) {
+        log_warning("Invalid access type: %d", msg->access_type);
+        response.error_code = ERR_BAD_REQUEST;
+        strcpy(response.content, "Invalid access type. Use -R for read or -W for write");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Add access
+    if (acl_add_access(&acl_table, msg->filename, msg->target_user, msg->access_type) < 0) {
+        log_error("Failed to add access for user '%s' to file '%s'", 
+                  msg->target_user, msg->filename);
+        response.error_code = ERR_SERVER_ERROR;
+        snprintf(response.content, sizeof(response.content),
+                 "Failed to grant access to '%s'", msg->target_user);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Persist changes
+    acl_save(&acl_table, ACL_DATA_FILE);
+    
+    response.error_code = ERR_SUCCESS;
+    snprintf(response.content, sizeof(response.content),
+             "Granted %s access to '%s' for user '%s'",
+             msg->access_type == ACCESS_READ ? "READ" : "WRITE",
+             msg->filename, msg->target_user);
+    send_message(client_socket, &response);
+    
+    log_info("Successfully granted access to '%s' for '%s'", msg->target_user, msg->filename);
+}
+
+void handle_remaccess_request(int client_socket, Message* msg) {
+    log_info("REMACCESS request from %s for file '%s', target user '%s'",
+             msg->sender_id, msg->filename, msg->target_user);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    // Check if requester is the owner
+    if (!acl_check_owner(&acl_table, msg->filename, msg->sender_id)) {
+        log_warning("Access denied: %s is not owner of '%s'", msg->sender_id, msg->filename);
+        response.error_code = ERR_ACCESS_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                 "Access denied: Only the owner can revoke access to '%s'", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Remove access
+    if (acl_remove_access(&acl_table, msg->filename, msg->target_user) < 0) {
+        log_warning("User '%s' had no access to file '%s'", msg->target_user, msg->filename);
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content),
+                 "User '%s' doesn't have access to '%s'", msg->target_user, msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Persist changes
+    acl_save(&acl_table, ACL_DATA_FILE);
+    
+    response.error_code = ERR_SUCCESS;
+    snprintf(response.content, sizeof(response.content),
+             "Revoked access to '%s' for user '%s'", msg->filename, msg->target_user);
+    send_message(client_socket, &response);
+    
+    log_info("Successfully revoked access for '%s' from '%s'", msg->target_user, msg->filename);
+}
+
+/* ============================================================================
+ * METADATA COMMAND HANDLERS
+ * ============================================================================ */
+
+void handle_list_request(int client_socket, Message* msg) {
+    log_info("LIST request from %s", msg->sender_id);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    response.error_code = ERR_SUCCESS;
+    
+    // Build list of all registered users
+    char user_list[MAX_CONTENT_LEN] = "";
+    int offset = 0;
+    
+    offset += snprintf(user_list + offset, sizeof(user_list) - offset,
+                      "Registered users (%d):\n", client_count);
+    
+    for (int i = 0; i < client_count && offset < MAX_CONTENT_LEN - 100; i++) {
+        if (clients[i].is_active) {
+            offset += snprintf(user_list + offset, sizeof(user_list) - offset,
+                             "  - %s\n", clients[i].username);
+        }
+    }
+    
+    strncpy(response.content, user_list, sizeof(response.content) - 1);
+    response.content[sizeof(response.content) - 1] = '\0';
+    
+    send_message(client_socket, &response);
+    log_info("LIST: Sent %d users to %s", client_count, msg->sender_id);
+}
+
+void handle_view_request(int client_socket, Message* msg) {
+    log_info("VIEW request from %s with flags: %d", msg->sender_id, msg->view_flags);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    response.error_code = ERR_SUCCESS;
+    
+    char file_list[MAX_CONTENT_LEN] = "";
+    int offset = 0;
+    char files[MAX_FILES][MAX_FILENAME_LEN];
+    int file_count;
+    
+    // Determine which files to show
+    if (msg->view_flags & VIEW_FLAG_ALL) {
+        // VIEW -a or VIEW -al: show all files
+        file_count = acl_get_all_files(&acl_table, files, MAX_FILES);
+        offset += snprintf(file_list + offset, sizeof(file_list) - offset,
+                          "All files (%d):\n", file_count);
+    } else {
+        // VIEW or VIEW -l: show only accessible files
+        file_count = acl_get_accessible_files(&acl_table, msg->sender_id, files, MAX_FILES);
+        offset += snprintf(file_list + offset, sizeof(file_list) - offset,
+                          "Accessible files (%d):\n", file_count);
+    }
+    
+    // Check if we need metadata (-l flag)
+    if (msg->view_flags & VIEW_FLAG_LONG) {
+        // VIEW -l or VIEW -al: include metadata
+        offset += snprintf(file_list + offset, sizeof(file_list) - offset,
+                          "%-30s %-10s %-20s %-10s %-10s\n",
+                          "Filename", "Size", "Modified", "Words", "Chars");
+        offset += snprintf(file_list + offset, sizeof(file_list) - offset,
+                          "----------------------------------------------------------------------------\n");
+        
+        for (int i = 0; i < file_count && offset < MAX_CONTENT_LEN - 200; i++) {
+            // Find which SS has the file
+            int ss_index = find_ss_for_file(files[i]);
+            if (ss_index < 0) continue;
+            
+            // Request metadata from SS
+            int ss_socket = create_socket();
+            if (ss_socket < 0 || 
+                connect_to_server(ss_socket, storage_servers[ss_index].base.ip,
+                                 storage_servers[ss_index].base.nm_port) < 0) {
+                log_warning("Failed to connect to SS for metadata");
+                if (ss_socket >= 0) close_socket(ss_socket);
+                continue;
+            }
+            
+            Message metadata_req;
+            INIT_MESSAGE(metadata_req);
+            metadata_req.operation = OP_GET_METADATA;
+            strncpy(metadata_req.filename, files[i], MAX_FILENAME_LEN - 1);
+            
+            if (send_message(ss_socket, &metadata_req) < 0) {
+                close_socket(ss_socket);
+                continue;
+            }
+            
+            Message metadata_resp;
+            if (receive_message(ss_socket, &metadata_resp) <= 0) {
+                close_socket(ss_socket);
+                continue;
+            }
+            
+            close_socket(ss_socket);
+            
+            if (metadata_resp.error_code == ERR_SUCCESS) {
+                // Parse metadata from content (format: "size|word_count|char_count|modified_time")
+                long size;
+                int word_count, char_count;
+                time_t mod_time;
+                
+                if (sscanf(metadata_resp.content, "%ld|%d|%d|%ld",
+                          &size, &word_count, &char_count, &mod_time) == 4) {
+                    
+                    char time_str[20];
+                    struct tm* tm_info = localtime(&mod_time);
+                    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M", tm_info);
+                    
+                    offset += snprintf(file_list + offset, sizeof(file_list) - offset,
+                                      "%-30s %-10ld %-20s %-10d %-10d\n",
+                                      files[i], size, time_str, word_count, char_count);
+                }
+            }
+        }
+    } else {
+        // Simple list (no metadata)
+        for (int i = 0; i < file_count && offset < MAX_CONTENT_LEN - 100; i++) {
+            offset += snprintf(file_list + offset, sizeof(file_list) - offset,
+                             "  - %s\n", files[i]);
+        }
+    }
+    
+    strncpy(response.content, file_list, sizeof(response.content) - 1);
+    response.content[sizeof(response.content) - 1] = '\0';
+    
+    send_message(client_socket, &response);
+    log_info("VIEW: Sent %d files to %s", file_count, msg->sender_id);
+}
+
+void handle_info_request(int client_socket, Message* msg) {
+    log_info("INFO request from %s for file '%s'", msg->sender_id, msg->filename);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    // Check if user has read access
+    if (!acl_check_read(&acl_table, msg->filename, msg->sender_id)) {
+        log_warning("Access denied: %s attempted INFO on '%s'", msg->sender_id, msg->filename);
+        response.error_code = ERR_ACCESS_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                 "Access denied: You don't have permission to view info for '%s'", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Check if file exists
+    int ss_index = find_ss_for_file(msg->filename);
+    if (ss_index < 0) {
+        log_warning("File '%s' not found", msg->filename);
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content),
+                 "File '%s' not found", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Get ACL information
+    char owner[MAX_USERNAME_LEN];
+    char access_list[512];  // Reduced size to avoid truncation warning
+    
+    if (acl_get_owner(&acl_table, msg->filename, owner, sizeof(owner)) < 0) {
+        strcpy(owner, "unknown");
+    }
+    
+    if (acl_get_access_list(&acl_table, msg->filename, access_list, sizeof(access_list)) < 0) {
+        strcpy(access_list, "No access information");
+    }
+    
+    // Request metadata from SS
+    int ss_socket = create_socket();
+    if (ss_socket < 0 || 
+        connect_to_server(ss_socket, storage_servers[ss_index].base.ip,
+                         storage_servers[ss_index].base.nm_port) < 0) {
+        log_error("Failed to connect to SS for metadata");
+        response.error_code = ERR_SS_UNAVAILABLE;
+        strcpy(response.content, "Failed to retrieve file metadata");
+        send_message(client_socket, &response);
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    Message metadata_req;
+    INIT_MESSAGE(metadata_req);
+    metadata_req.operation = OP_GET_METADATA;
+    strncpy(metadata_req.filename, msg->filename, MAX_FILENAME_LEN - 1);
+    
+    if (send_message(ss_socket, &metadata_req) < 0 ||
+        receive_message(ss_socket, &response) <= 0) {
+        log_error("Failed to get metadata from SS");
+        close_socket(ss_socket);
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.content, "Failed to retrieve file metadata");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    if (response.error_code != ERR_SUCCESS) {
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Parse metadata from SS response
+    long size;
+    int word_count, char_count;
+    time_t created_time, mod_time, access_time;
+    
+    if (sscanf(response.content, "%ld|%d|%d|%ld|%ld|%ld",
+              &size, &word_count, &char_count, &created_time, &mod_time, &access_time) == 6) {
+        
+        char created_str[30], modified_str[30], accessed_str[30];
+        struct tm* tm_info;
+        
+        tm_info = localtime(&created_time);
+        strftime(created_str, sizeof(created_str), "%Y-%m-%d %H:%M:%S", tm_info);
+        
+        tm_info = localtime(&mod_time);
+        strftime(modified_str, sizeof(modified_str), "%Y-%m-%d %H:%M:%S", tm_info);
+        
+        tm_info = localtime(&access_time);
+        strftime(accessed_str, sizeof(accessed_str), "%Y-%m-%d %H:%M:%S", tm_info);
+        
+        // Format comprehensive info
+        snprintf(response.content, sizeof(response.content),
+                "File Information: %s\n"
+                "==========================================\n"
+                "Owner:          %s\n"
+                "Access:         %s\n"
+                "Size:           %ld bytes\n"
+                "Word Count:     %d\n"
+                "Char Count:     %d\n"
+                "Created:        %s\n"
+                "Last Modified:  %s\n"
+                "Last Accessed:  %s\n"
+                "Location:       SS[%d] at %s:%d\n",
+                msg->filename, owner, access_list, size, word_count, char_count,
+                created_str, modified_str, accessed_str,
+                ss_index, storage_servers[ss_index].base.ip,
+                storage_servers[ss_index].base.client_port);
+    }
+    
+    response.error_code = ERR_SUCCESS;
+    send_message(client_socket, &response);
+    log_info("INFO: Sent file info for '%s' to %s", msg->filename, msg->sender_id);
 }
 
 /* ============================================================================
@@ -607,6 +1016,31 @@ void handle_connection(int conn_socket, char* client_ip, int client_port) {
             
         case OP_DELETE:
             handle_delete_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_ADDACCESS:
+            handle_addaccess_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_REMACCESS:
+            handle_remaccess_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_LIST:
+            handle_list_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_VIEW:
+            handle_view_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_INFO:
+            handle_info_request(conn_socket, &msg);
             close_socket(conn_socket);
             break;
             

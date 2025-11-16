@@ -50,6 +50,7 @@
 #define OP_STOP             62  // End of transmission
 #define OP_LOCK_SENTENCE    63  // Request sentence lock
 #define OP_UNLOCK_SENTENCE  64  // Release sentence lock
+#define OP_GET_METADATA     65  // NS requests metadata from SS
 
 // Write Operations (70-79)
 #define OP_WRITE_START      70  // Start WRITE session
@@ -245,6 +246,7 @@ typedef struct {
  * ERROR MESSAGES - Human readable error messages
  * ============================================================================ */
 
+__attribute__((unused))
 static const char* get_error_message(int error_code) {
     switch(error_code) {
         case ERR_SUCCESS:           return "Success";
@@ -271,6 +273,7 @@ static const char* get_error_message(int error_code) {
  * OPERATION NAMES - For logging and debugging
  * ============================================================================ */
 
+__attribute__((unused))
 static const char* get_operation_name(int operation) {
     switch(operation) {
         case OP_CREATE:             return "CREATE";
@@ -297,6 +300,7 @@ static const char* get_operation_name(int operation) {
         case OP_STOP:               return "STOP";
         case OP_LOCK_SENTENCE:      return "LOCK_SENTENCE";
         case OP_UNLOCK_SENTENCE:    return "UNLOCK_SENTENCE";
+        case OP_GET_METADATA:       return "GET_METADATA";
         
         case OP_WRITE_START:        return "WRITE_START";
         case OP_WRITE_UPDATE:       return "WRITE_UPDATE";

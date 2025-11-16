@@ -83,9 +83,14 @@ main: nameserver storageserver client
 
 nameserver: $(NAMESERVER)
 
-$(NAMESERVER): $(NS_DIR)/nameserver.c $(COMMON_OBJS)
+$(NAMESERVER): $(NS_DIR)/nameserver.c $(NS_DIR)/acl.o $(COMMON_OBJS)
 	@echo "Building nameserver..."
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+# ACL module for nameserver
+$(NS_DIR)/acl.o: $(NS_DIR)/acl.c $(NS_DIR)/acl.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
+	@echo "Building ACL module..."
+	$(CC) $(CFLAGS) -c $(NS_DIR)/acl.c -o $@
 
 storageserver: $(STORAGESERVER)
 
@@ -142,8 +147,10 @@ run-client: $(CLIENT) $(LOG_DIR)
 clean:
 	@echo "Cleaning build files..."
 	@rm -f $(COMMON_DIR)/*.o
+	@rm -f $(NS_DIR)/*.o
 	@rm -f $(TEST_SERVER) $(TEST_CLIENT)
 	@rm -f $(CLIENT) $(NAMESERVER) $(STORAGESERVER)
+	@rm -f acl_data.db
 	@echo "✓ Clean complete"
 
 # Clean everything including logs and storage

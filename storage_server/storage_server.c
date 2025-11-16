@@ -65,6 +65,8 @@ int create_file(const char* filename, const char* owner) {
     char filepath[MAX_PATH_LEN];
     get_file_path(filename, filepath);
     
+    (void)owner;  // Reserved for future use (metadata tracking)
+    
     if (file_exists(filename)) {
         log_warning("File '%s' already exists", filename);
         return ERR_CONFLICT;
@@ -120,6 +122,59 @@ int delete_file(const char* filename) {
     }
     
     log_info("File '%s' deleted successfully", filename);
+    return ERR_SUCCESS;
+}
+
+int get_file_metadata(const char* filename, char* metadata_str, size_t str_size) {
+    char filepath[MAX_PATH_LEN];
+    get_file_path(filename, filepath);
+    
+    if (!file_exists(filename)) {
+        log_warning("File '%s' not found for metadata", filename);
+        return ERR_NOT_FOUND;
+    }
+    
+    struct stat st;
+    if (stat(filepath, &st) != 0) {
+        log_error("Failed to stat file '%s': %s", filename, strerror(errno));
+        return ERR_SERVER_ERROR;
+    }
+    
+    // Calculate word count and character count
+    FILE* fp = fopen(filepath, "r");
+    if (fp == NULL) {
+        log_error("Failed to open file '%s' for metadata: %s", filename, strerror(errno));
+        return ERR_SERVER_ERROR;
+    }
+    
+    int word_count = 0;
+    int char_count = 0;
+    int in_word = 0;
+    int c;
+    
+    while ((c = fgetc(fp)) != EOF) {
+        char_count++;
+        
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            in_word = 0;
+        } else {
+            if (!in_word) {
+                word_count++;
+                in_word = 1;
+            }
+        }
+    }
+    
+    fclose(fp);
+    
+    // Format: size|word_count|char_count|created_time|modified_time|accessed_time
+    snprintf(metadata_str, str_size, "%ld|%d|%d|%ld|%ld|%ld",
+             (long)st.st_size, word_count, char_count,
+             (long)st.st_ctime, (long)st.st_mtime, (long)st.st_atime);
+    
+    log_info("Metadata for '%s': size=%ld, words=%d, chars=%d",
+             filename, (long)st.st_size, word_count, char_count);
+    
     return ERR_SUCCESS;
 }
 
@@ -198,7 +253,7 @@ int register_with_nameserver(char files[][MAX_FILENAME_LEN], int file_count) {
                                 "%s|", files[i]);
         
         // Safety check: Stop if the content buffer is full
-        if (current_len + required >= sizeof(file_list_str)) {
+        if (current_len + (size_t)required >= sizeof(file_list_str)) {
             log_warning("File list truncated during serialization for NS registration.");
             break;
         }
@@ -291,6 +346,7 @@ void handle_read_from_client(int client_socket, Message* msg) {
 
 // NEW THREAD: Handles NS-forwarded requests (CREATE/DELETE) on SS_NM_PORT (8081)
 void* ns_inbound_thread(void* arg) {
+    (void)arg;  // Unused parameter (required by pthread signature)
     log_info("NS inbound thread started on port %d", SS_NM_PORT);
     
     while (1) {
@@ -323,6 +379,29 @@ void* ns_inbound_thread(void* arg) {
             result = create_file(msg.filename, msg.sender_id);
         } else if (msg.operation == OP_DELETE) {
             result = delete_file(msg.filename);
+        } else if (msg.operation == OP_GET_METADATA) {
+            // Handle metadata request
+            char metadata[MAX_CONTENT_LEN];
+            result = get_file_metadata(msg.filename, metadata, sizeof(metadata));
+            
+            // Send response back to NS
+            Message response;
+            INIT_MESSAGE(response);
+            response.operation = OP_ACK;
+            response.error_code = result;
+            
+            if (result == ERR_SUCCESS) {
+                strncpy(response.content, metadata, sizeof(response.content) - 1);
+                response.content[sizeof(response.content) - 1] = '\0';
+            } else {
+                snprintf(response.content, sizeof(response.content),
+                        "Failed to get metadata: %s", get_error_message(result));
+            }
+            
+            send_message(ns_conn_socket, &response);
+            log_info("Sent metadata response to NS");
+            close_socket(ns_conn_socket);
+            continue;
         } else {
             log_warning("Unknown operation from NS: %d", msg.operation);
             result = ERR_NOT_IMPLEMENTED;
@@ -352,6 +431,7 @@ void* ns_inbound_thread(void* arg) {
 
 // Thread to handle client connections on SS_CLIENT_PORT (8082)
 void* client_server_thread(void* arg) {
+    (void)arg;  // Unused parameter (required by pthread signature)
     log_info("Client server thread started on port %d", SS_CLIENT_PORT);
     
     while (1) {

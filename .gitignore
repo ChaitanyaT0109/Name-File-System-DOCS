@@ -21,3 +21,7 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Test documentation (local only)
+Manual_test.md
+
