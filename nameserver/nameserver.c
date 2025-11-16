@@ -20,6 +20,7 @@
 #define NS_PORT 8080
 #define MAX_CONNECTIONS 50
 #define MAX_FILES 1000
+#define HASH_TABLE_SIZE 1009  // Prime number for better distribution
 
 /* ============================================================================
  * EXTENDED STORAGE SERVER INFO (add files list)
@@ -30,6 +31,23 @@ typedef struct {
     int file_count;
     char files[MAX_FILES][MAX_FILENAME_LEN];
 } ExtendedSSInfo;
+
+/* ============================================================================
+ * HASH MAP FOR FILE->SS MAPPING (O(1) lookup)
+ * ============================================================================ */
+
+typedef struct HashNode {
+    char filename[MAX_FILENAME_LEN];
+    int ss_index;  // Which storage server has this file
+    struct HashNode* next;  // For collision chaining
+} HashNode;
+
+typedef struct {
+    HashNode* buckets[HASH_TABLE_SIZE];
+    int size;  // Total number of entries
+} HashMap;
+
+HashMap file_map;
 
 /* ============================================================================
  * GLOBAL REGISTRY (Original code retained)
@@ -50,19 +68,147 @@ void init_registries() {
     memset(clients, 0, sizeof(clients));
     ss_count = 0;
     client_count = 0;
+    
+    // Initialize HashMap
+    memset(&file_map, 0, sizeof(HashMap));
+    for (int i = 0; i < HASH_TABLE_SIZE; i++) {
+        file_map.buckets[i] = NULL;
+    }
+    file_map.size = 0;
 }
 
-int find_ss_for_file(const char* filename) {
-    for (int i = 0; i < ss_count; i++) {
-        if (!storage_servers[i].base.is_alive) continue;
-        
-        for (int j = 0; j < storage_servers[i].file_count; j++) {
-            if (strcmp(storage_servers[i].files[j], filename) == 0) {
-                return i;
+/* ============================================================================
+ * HASH MAP IMPLEMENTATION FOR O(1) FILE LOOKUP
+ * ============================================================================ */
+
+// Simple hash function (djb2 algorithm)
+unsigned int hash_string(const char* str) {
+    unsigned long hash = 5381;
+    int c;
+    
+    while ((c = *str++)) {
+        hash = ((hash << 5) + hash) + c; // hash * 33 + c
+    }
+    
+    return hash % HASH_TABLE_SIZE;
+}
+
+// Add file to HashMap
+void hashmap_add(const char* filename, int ss_index) {
+    unsigned int index = hash_string(filename);
+    
+    // Check if file already exists (update if so)
+    HashNode* current = file_map.buckets[index];
+    while (current != NULL) {
+        if (strcmp(current->filename, filename) == 0) {
+            current->ss_index = ss_index;  // Update existing entry
+            log_debug("Updated HashMap: %s -> SS[%d]", filename, ss_index);
+            return;
+        }
+        current = current->next;
+    }
+    
+    // Create new node
+    HashNode* new_node = (HashNode*)malloc(sizeof(HashNode));
+    if (new_node == NULL) {
+        log_error("Failed to allocate memory for HashMap node");
+        return;
+    }
+    
+    strncpy(new_node->filename, filename, MAX_FILENAME_LEN - 1);
+    new_node->filename[MAX_FILENAME_LEN - 1] = '\0';
+    new_node->ss_index = ss_index;
+    
+    // Insert at head of bucket (most efficient)
+    new_node->next = file_map.buckets[index];
+    file_map.buckets[index] = new_node;
+    file_map.size++;
+    
+    log_debug("Added to HashMap: %s -> SS[%d] (bucket %u, total: %d)", 
+             filename, ss_index, index, file_map.size);
+}
+
+// Find which SS has a file - O(1) average case
+int hashmap_find(const char* filename) {
+    unsigned int index = hash_string(filename);
+    
+    HashNode* current = file_map.buckets[index];
+    while (current != NULL) {
+        if (strcmp(current->filename, filename) == 0) {
+            log_debug("HashMap lookup: %s found at SS[%d]", filename, current->ss_index);
+            return current->ss_index;
+        }
+        current = current->next;
+    }
+    
+    log_debug("HashMap lookup: %s not found", filename);
+    return -1;  // Not found
+}
+
+// Remove file from HashMap
+void hashmap_remove(const char* filename) {
+    unsigned int index = hash_string(filename);
+    
+    HashNode* current = file_map.buckets[index];
+    HashNode* prev = NULL;
+    
+    while (current != NULL) {
+        if (strcmp(current->filename, filename) == 0) {
+            // Found it - remove from linked list
+            if (prev == NULL) {
+                // First node in bucket
+                file_map.buckets[index] = current->next;
+            } else {
+                prev->next = current->next;
+            }
+            
+            log_debug("Removed from HashMap: %s (was at SS[%d])", 
+                     filename, current->ss_index);
+            free(current);
+            file_map.size--;
+            return;
+        }
+        prev = current;
+        current = current->next;
+    }
+}
+
+// Get HashMap statistics (for monitoring/debugging)
+void hashmap_stats() {
+    int used_buckets = 0;
+    int max_chain = 0;
+    
+    for (int i = 0; i < HASH_TABLE_SIZE; i++) {
+        if (file_map.buckets[i] != NULL) {
+            used_buckets++;
+            
+            // Count chain length
+            int chain_len = 0;
+            HashNode* current = file_map.buckets[i];
+            while (current != NULL) {
+                chain_len++;
+                current = current->next;
+            }
+            
+            if (chain_len > max_chain) {
+                max_chain = chain_len;
             }
         }
     }
-    return -1;
+    
+    double load_factor = (double)file_map.size / HASH_TABLE_SIZE;
+    log_info("HashMap Stats: %d files, %d/%d buckets used (%.2f%%), max chain: %d, load: %.3f",
+             file_map.size, used_buckets, HASH_TABLE_SIZE, 
+             (used_buckets * 100.0 / HASH_TABLE_SIZE), max_chain, load_factor);
+}
+
+/* ============================================================================
+ * FILE LOOKUP FUNCTIONS (Updated to use HashMap)
+ * ============================================================================ */
+
+int find_ss_for_file(const char* filename) {
+    // Use O(1) HashMap lookup instead of O(N) linear search
+    return hashmap_find(filename);
 }
 
 int find_available_ss() {
@@ -82,6 +228,10 @@ void add_file_to_ss(int ss_index, const char* filename) {
         strncpy(storage_servers[ss_index].files[file_idx], filename, MAX_FILENAME_LEN - 1);
         storage_servers[ss_index].files[file_idx][MAX_FILENAME_LEN - 1] = '\0';
         storage_servers[ss_index].file_count++;
+        
+        // Add to HashMap for O(1) lookup
+        hashmap_add(filename, ss_index);
+        
         log_info("Added file '%s' to SS[%d], total files: %d", 
                  filename, ss_index, storage_servers[ss_index].file_count);
     }
@@ -130,6 +280,10 @@ void handle_ss_registration(int ss_socket, Message* msg) {
         if (files_added < MAX_FILES) {
             strncpy(storage_servers[ss_index].files[files_added], token, MAX_FILENAME_LEN - 1);
             storage_servers[ss_index].files[files_added][MAX_FILENAME_LEN - 1] = '\0';
+            
+            // Add to HashMap for O(1) lookup
+            hashmap_add(token, ss_index);
+            
             files_added++;
         }
         token = strtok(NULL, "|");
@@ -145,6 +299,9 @@ void handle_ss_registration(int ss_socket, Message* msg) {
     log_info("  NM Port: %d", storage_servers[ss_index].base.nm_port);
     log_info("  Client Port: %d", storage_servers[ss_index].base.client_port);
     log_info("  Loaded %d existing files.", files_added);
+    
+    // Log HashMap statistics
+    hashmap_stats();
     
     // Send ACK
     Message response;
@@ -389,6 +546,10 @@ void handle_delete_request(int client_socket, Message* msg) {
     close_socket(ss_socket);
     
     if (ss_response.error_code == ERR_SUCCESS) {
+        // Remove from HashMap
+        hashmap_remove(msg->filename);
+        
+        // Remove from SS's file list
         for (int i = 0; i < storage_servers[ss_index].file_count; i++) {
             if (strcmp(storage_servers[ss_index].files[i], msg->filename) == 0) {
                 for (int j = i; j < storage_servers[ss_index].file_count - 1; j++) {
@@ -406,12 +567,72 @@ void handle_delete_request(int client_socket, Message* msg) {
 }
 
 /* ============================================================================
- * MAIN SERVER LOOP (Modified for SO_REUSEADDR)
+ * REQUEST HANDLER - Process client/SS requests
+ * ============================================================================ */
+
+void handle_connection(int conn_socket, char* client_ip, int client_port) {
+    log_info("New connection from %s:%d on socket %d", client_ip, client_port, conn_socket);
+    
+    Message msg;
+    int bytes = receive_message(conn_socket, &msg);
+    
+    if (bytes <= 0) {
+        log_error("Failed to receive initial message from %s:%d", client_ip, client_port);
+        close_socket(conn_socket);
+        return;
+    }
+    
+    switch (msg.operation) {
+        case OP_REGISTER_SS:
+            log_info("Storage Server registration request");
+            handle_ss_registration(conn_socket, &msg);
+            close_socket(conn_socket); 
+            break;
+            
+        case OP_REGISTER_CLIENT:
+            log_info("Client registration request from %s", msg.sender_id);
+            handle_client_registration(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_CREATE:
+            handle_create_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_READ:
+            handle_read_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_DELETE:
+            handle_delete_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        default:
+            log_warning("Unknown operation: %d from %s:%d", msg.operation, client_ip, client_port);
+            Message response;
+            INIT_MESSAGE(response);
+            response.operation = OP_ACK;
+            response.error_code = ERR_NOT_IMPLEMENTED;
+            strcpy(response.content, "Operation not implemented");
+            send_message(conn_socket, &response);
+            close_socket(conn_socket);
+            break;
+    }
+}
+
+/* ============================================================================
+ * MAIN SERVER LOOP - Using select() for concurrent connections
  * ============================================================================ */
 
 int main() {
     int server_socket;
-    int opt = 1; // Used for SO_REUSEADDR option
+    int opt = 1;
+    fd_set read_fds, active_fds;
+    int max_fd;
+    struct timeval timeout;
     
     init_logger("NS", "logs/nameserver.log");
     
@@ -420,7 +641,7 @@ int main() {
     log_info("==========================================================");
     
     init_registries();
-    log_info("Registries initialized");
+    log_info("Registries initialized with HashMap (O(1) lookup)");
     
     // Create server socket
     server_socket = create_socket();
@@ -430,7 +651,7 @@ int main() {
     }
     log_info("Server socket created (fd: %d)", server_socket);
     
-    // FIX: Set SO_REUSEADDR to prevent "Address already in use"
+    // Set SO_REUSEADDR to prevent "Address already in use"
     if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         log_critical("setsockopt(SO_REUSEADDR) failed for NS listener");
     }
@@ -449,74 +670,89 @@ int main() {
         close_socket(server_socket);
         return 1;
     }
-    log_info("Server listening on port %d", NS_PORT);
-    log_info("Waiting for Storage Servers and Clients to connect...");
+    log_info("Server listening on port %d with select() multiplexing", NS_PORT);
+    log_info("Ready to handle concurrent SS and Client connections");
     log_info("==========================================================");
     
-    // Main server loop
+    // Initialize file descriptor sets for select()
+    FD_ZERO(&active_fds);
+    FD_SET(server_socket, &active_fds);
+    max_fd = server_socket;
+    
+    // Main server loop with select()
     while (1) {
-        char client_ip[MAX_IP_LEN];
-        int client_port;
+        // Copy active_fds to read_fds (select modifies the set)
+        read_fds = active_fds;
         
-        int conn_socket = accept_connection(server_socket, client_ip, &client_port);
-        if (conn_socket < 0) {
-            log_error("Failed to accept connection");
+        // Set timeout for select (1 second - allows periodic checks)
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+        
+        // Wait for activity on any socket
+        int activity = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
+        
+        if (activity < 0) {
+            if (errno == EINTR) {
+                // Interrupted by signal, continue
+                continue;
+            }
+            log_error("select() error: %s", strerror(errno));
             continue;
         }
         
-        log_info("New connection from %s:%d", client_ip, client_port);
-        
-        Message msg;
-        int bytes = receive_message(conn_socket, &msg);
-        
-        if (bytes <= 0) {
-            log_error("Failed to receive initial message");
-            close_socket(conn_socket);
+        if (activity == 0) {
+            // Timeout - no activity, just continue
             continue;
         }
         
-        switch (msg.operation) {
-            case OP_REGISTER_SS:
-                log_info("Storage Server registration request");
-                handle_ss_registration(conn_socket, &msg);
-                // SS registration connection is closed inside handle_ss_registration 
-                // after sending ACK (or stays open for heartbeats, which is a choice).
-                // If it's a transient connection (like SS->NS->ACK), close here.
-                // Based on SS code, it's transient:
-                close_socket(conn_socket); 
-                break;
+        // Check all file descriptors for activity
+        for (int fd = 0; fd <= max_fd; fd++) {
+            if (!FD_ISSET(fd, &read_fds)) {
+                continue;  // No activity on this fd
+            }
+            
+            if (fd == server_socket) {
+                // Activity on server socket = new connection
+                char client_ip[MAX_IP_LEN];
+                int client_port;
                 
-            case OP_REGISTER_CLIENT:
-                log_info("Client registration request from %s", msg.sender_id);
-                handle_client_registration(conn_socket, &msg);
-                close_socket(conn_socket);
-                break;
+                int new_socket = accept_connection(server_socket, client_ip, &client_port);
+                if (new_socket < 0) {
+                    log_error("Failed to accept connection");
+                    continue;
+                }
                 
-            case OP_CREATE:
-                handle_create_request(conn_socket, &msg);
-                close_socket(conn_socket);
-                break;
+                log_info("New connection accepted on socket %d from %s:%d", 
+                        new_socket, client_ip, client_port);
                 
-            case OP_READ:
-                handle_read_request(conn_socket, &msg);
-                close_socket(conn_socket);
-                break;
+                // Add new socket to active set
+                FD_SET(new_socket, &active_fds);
+                if (new_socket > max_fd) {
+                    max_fd = new_socket;
+                }
                 
-            case OP_DELETE:
-                handle_delete_request(conn_socket, &msg);
-                close_socket(conn_socket);
-                break;
+                log_debug("Added socket %d to active set (max_fd: %d)", new_socket, max_fd);
                 
-            default:
-                log_warning("Unknown operation: %d", msg.operation);
-                Message response;
-                INIT_MESSAGE(response);
-                response.operation = OP_ACK;
-                response.error_code = ERR_NOT_IMPLEMENTED;
-                strcpy(response.content, "Operation not implemented");
-                send_message(conn_socket, &response);
-                close_socket(conn_socket);
-                break;
+            } else {
+                // Activity on existing connection = data ready to read
+                char client_ip[MAX_IP_LEN] = "unknown";
+                int client_port = 0;
+                
+                // Get peer info for logging
+                struct sockaddr_in addr;
+                socklen_t addr_len = sizeof(addr);
+                if (getpeername(fd, (struct sockaddr*)&addr, &addr_len) == 0) {
+                    inet_ntop(AF_INET, &addr.sin_addr, client_ip, MAX_IP_LEN);
+                    client_port = ntohs(addr.sin_port);
+                }
+                
+                                // Handle the request (this will close the socket when done)
+                handle_connection(fd, client_ip, client_port);
+                
+                // Remove from active set (socket was closed in handle_connection)
+                FD_CLR(fd, &active_fds);
+                log_debug("Removed socket %d from active set", fd);
+            }
         }
     }
     

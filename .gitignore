@@ -1,0 +1,23 @@
+# Compiled binaries
+*.o
+*.out
+client/client
+nameserver/nameserver
+storage_server/storage_server
+
+
+# Log files (runtime generated)
+logs/*.log
+
+# IDE files
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
