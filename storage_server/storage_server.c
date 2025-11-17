@@ -591,6 +591,86 @@ void handle_undo_request(int client_socket, Message* msg) {
     log_info("UNDO completed for file '%s'", msg->filename);
 }
 
+void handle_stream_request(int client_socket, Message* msg) {
+    log_info("STREAM request from client for file '%s'", msg->filename);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    
+    // Check if file exists
+    if (!file_exists(msg->filename)) {
+        response.operation = OP_ACK;
+        response.error_code = ERR_NOT_FOUND;
+        strcpy(response.content, "File not found");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Read file content
+    char file_content[MAX_CONTENT_LEN];
+    int read_result = read_file(msg->filename, file_content, sizeof(file_content));
+    
+    if (read_result != ERR_SUCCESS) {
+        response.operation = OP_ACK;
+        response.error_code = read_result;
+        strcpy(response.content, "Failed to read file");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Send ACK first
+    response.operation = OP_ACK;
+    response.error_code = ERR_SUCCESS;
+    strcpy(response.content, "Starting stream");
+    send_message(client_socket, &response);
+    
+    // Parse content into words
+    char** words;
+    int word_count = parse_words(file_content, &words);
+    
+    if (word_count == 0) {
+        // Empty file - send STOP
+        Message stop;
+        INIT_MESSAGE(stop);
+        stop.operation = OP_STOP;
+        send_message(client_socket, &stop);
+        log_info("STREAM completed: empty file");
+        return;
+    }
+    
+    log_info("Streaming %d words from file '%s'", word_count, msg->filename);
+    
+    // Stream words one by one with 0.1s delay
+    for (int i = 0; i < word_count; i++) {
+        Message word_msg;
+        INIT_MESSAGE(word_msg);
+        word_msg.operation = OP_STREAM;
+        word_msg.error_code = ERR_SUCCESS;
+        strncpy(word_msg.content, words[i], MAX_CONTENT_LEN - 1);
+        word_msg.word_index = i;  // Track word position
+        
+        int send_result = send_message(client_socket, &word_msg);
+        if (send_result <= 0) {
+            log_warning("Client disconnected during stream at word %d/%d", i + 1, word_count);
+            free_words(words, word_count);
+            return;
+        }
+        
+        // 0.1 second delay between words
+        usleep(100000);  // 100,000 microseconds = 0.1 seconds
+    }
+    
+    free_words(words, word_count);
+    
+    // Send STOP to indicate stream complete
+    Message stop;
+    INIT_MESSAGE(stop);
+    stop.operation = OP_STOP;
+    send_message(client_socket, &stop);
+    
+    log_info("STREAM completed successfully: %d words sent", word_count);
+}
+
 /* ============================================================================
  * REQUEST HANDLERS (Original code retained)
  * ============================================================================ */
@@ -762,6 +842,10 @@ void* client_server_thread(void* arg) {
                 
             case OP_UNDO:
                 handle_undo_request(client_socket, &msg);
+                break;
+                
+            case OP_STREAM:
+                handle_stream_request(client_socket, &msg);
                 break;
                 
             default:

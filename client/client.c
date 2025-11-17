@@ -924,6 +924,190 @@ void cmd_undo(const char* filename) {
     log_info("UNDO completed");
 }
 
+/* ============================================================================
+ * STREAM Command Implementation (Days 12-13)
+ * ============================================================================ */
+void cmd_stream(const char* filename) {
+    if (!filename || strlen(filename) == 0) {
+        printf("Error: Filename required\n");
+        printf("Usage: STREAM <filename>\n");
+        return;
+    }
+    
+    log_info("STREAM command: file=%s", filename);
+    
+    // Step 1: Contact NS to get SS routing info
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_STREAM;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: No response from Name Server\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    // Check if NS returned error
+    if (response.operation != OP_ROUTE_INFO) {
+        printf("✗ Error: %s\n", response.content);
+        log_error("STREAM failed: %s", get_error_message(response.error_code));
+        return;
+    }
+    
+    // Step 2: Connect to SS
+    char ss_ip[MAX_IP_LEN];
+    int ss_port = response.ss_port;
+    strncpy(ss_ip, response.ss_ip, MAX_IP_LEN - 1);
+    ss_ip[MAX_IP_LEN - 1] = '\0';
+    
+    log_info("Connecting to Storage Server at %s:%d for streaming", ss_ip, ss_port);
+    
+    int ss_socket = create_socket();
+    if (ss_socket < 0 || connect_to_server(ss_socket, ss_ip, ss_port) < 0) {
+        printf("Error: Failed to connect to Storage Server\n");
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    // Step 3: Send STREAM request to SS
+    Message stream_msg;
+    INIT_MESSAGE(stream_msg);
+    stream_msg.operation = OP_STREAM;
+    strncpy(stream_msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(stream_msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    if (send_message(ss_socket, &stream_msg) < 0) {
+        printf("Error: Failed to send STREAM request to Storage Server\n");
+        close_socket(ss_socket);
+        return;
+    }
+    
+    // Step 4: Receive and display streaming words
+    printf("\n");
+    printf("─────────────────────────────────────────────────────────────\n");
+    printf("Streaming: %s\n", filename);
+    printf("─────────────────────────────────────────────────────────────\n");
+    
+    int word_count = 0;
+    int words_per_line = 10;  // Display 10 words per line
+    
+    while (1) {
+        Message word_msg;
+        int bytes = receive_message(ss_socket, &word_msg);
+        
+        if (bytes <= 0) {
+            printf("\nError: Connection lost during streaming\n");
+            break;
+        }
+        
+        // Check for stream end
+        if (word_msg.operation == OP_STOP) {
+            printf("\n");
+            printf("─────────────────────────────────────────────────────────────\n");
+            printf("✓ Stream complete: %d words received\n", word_count);
+            break;
+        }
+        
+        // Check for errors
+        if (word_msg.error_code != ERR_SUCCESS) {
+            printf("\nError: %s\n", word_msg.content);
+            break;
+        }
+        
+        // Display the word
+        printf("%s ", word_msg.content);
+        fflush(stdout);  // Ensure immediate display
+        
+        word_count++;
+        
+        // Add newline every 10 words for readability
+        if (word_count % words_per_line == 0) {
+            printf("\n");
+        }
+    }
+    
+    close_socket(ss_socket);
+    log_info("STREAM completed: %d words", word_count);
+}
+
+/* ============================================================================
+ * EXEC Command Implementation (Days 12-13)
+ * ============================================================================ */
+void cmd_exec(const char* filename) {
+    if (!filename || strlen(filename) == 0) {
+        printf("Error: Filename required\n");
+        printf("Usage: EXEC <filename>\n");
+        return;
+    }
+    
+    log_info("EXEC command: file=%s", filename);
+    
+    // Contact NS to execute the file
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_EXEC;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    if (send_message(ns_socket, &msg) < 0) {
+        printf("Error: Failed to send EXEC request\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    log_info("Sent EXEC request to NS");
+    
+    // Receive execution output
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: No response from Name Server\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    // Display results
+    if (response.error_code == ERR_SUCCESS) {
+        printf("\n");
+        printf("─────────────────────────────────────────────────────────────\n");
+        printf("Execution Output: %s\n", filename);
+        printf("─────────────────────────────────────────────────────────────\n");
+        printf("%s", response.content);
+        if (strlen(response.content) > 0 && response.content[strlen(response.content)-1] != '\n') {
+            printf("\n");
+        }
+        printf("─────────────────────────────────────────────────────────────\n");
+        printf("✓ Command executed successfully\n");
+    } else {
+        printf("✗ Error: %s\n", response.content);
+        log_error("EXEC failed: %s", get_error_message(response.error_code));
+    }
+    
+    log_info("EXEC completed");
+}
+
 void cmd_help() {
     printf("\n");
     printf("Available Commands:\n");
@@ -934,6 +1118,8 @@ void cmd_help() {
     printf("    WRITE <filename> <sentence_num>  - Edit words in a sentence\n");
     printf("    DELETE <filename>                - Delete a file\n");
     printf("    UNDO <filename>                  - Restore file to previous state\n");
+    printf("    STREAM <filename>                - Stream file content word-by-word\n");
+    printf("    EXEC <filename>                  - Execute file content as command\n");
     printf("\n");
     printf("  File Information:\n");
     printf("    VIEW                             - List files you can access\n");
@@ -960,6 +1146,8 @@ void cmd_help() {
     printf("  READ mydoc.txt\n");
     printf("  WRITE mydoc.txt 0\n");
     printf("  UNDO mydoc.txt\n");
+    printf("  STREAM mydoc.txt\n");
+    printf("  EXEC script.sh\n");
     printf("  VIEW -l\n");
     printf("  INFO mydoc.txt\n");
     printf("  ADDACCESS -R mydoc.txt alice\n");
@@ -1051,6 +1239,10 @@ int main() {
             cmd_delete(arg1);
         } else if (strcmp(command, "UNDO") == 0) {
             cmd_undo(arg1);
+        } else if (strcmp(command, "STREAM") == 0) {
+            cmd_stream(arg1);
+        } else if (strcmp(command, "EXEC") == 0) {
+            cmd_exec(arg1);
         } else if (strcmp(command, "LIST") == 0) {
             cmd_list();
         } else if (strcmp(command, "VIEW") == 0) {

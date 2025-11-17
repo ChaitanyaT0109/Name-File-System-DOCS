@@ -52,6 +52,29 @@ typedef struct {
 HashMap file_map;
 
 /* ============================================================================
+ * LRU CACHE FOR EFFICIENT SEARCH (Days 12-13 optimization)
+ * ============================================================================ */
+
+#define LRU_CACHE_SIZE 100
+
+typedef struct LRUNode {
+    char filename[MAX_FILENAME_LEN];
+    int ss_index;
+    struct LRUNode* prev;
+    struct LRUNode* next;
+} LRUNode;
+
+typedef struct {
+    LRUNode* head;  // Most recently used
+    LRUNode* tail;  // Least recently used
+    int size;
+    int hits;
+    int misses;
+} LRUCache;
+
+LRUCache lru_cache;
+
+/* ============================================================================
  * ACCESS CONTROL LIST (ACL)
  * ============================================================================ */
 
@@ -84,6 +107,14 @@ void init_registries() {
     }
     file_map.size = 0;
     
+    // Initialize LRU Cache
+    memset(&lru_cache, 0, sizeof(LRUCache));
+    lru_cache.head = NULL;
+    lru_cache.tail = NULL;
+    lru_cache.size = 0;
+    lru_cache.hits = 0;
+    lru_cache.misses = 0;
+    
     // Initialize ACL
     acl_init(&acl_table);
     
@@ -93,6 +124,99 @@ void init_registries() {
         acl_stats(&acl_table);
     } else {
         log_info("Starting with empty ACL (no saved data)");
+    }
+}
+
+/* ============================================================================
+ * LRU CACHE IMPLEMENTATION (Days 12-13 optimization)
+ * ============================================================================ */
+
+// Move node to front (most recently used)
+void lru_move_to_front(LRUNode* node) {
+    if (node == lru_cache.head) return;
+    
+    // Remove from current position
+    if (node->prev) node->prev->next = node->next;
+    if (node->next) node->next->prev = node->prev;
+    if (node == lru_cache.tail) lru_cache.tail = node->prev;
+    
+    // Move to front
+    node->prev = NULL;
+    node->next = lru_cache.head;
+    if (lru_cache.head) lru_cache.head->prev = node;
+    lru_cache.head = node;
+    if (!lru_cache.tail) lru_cache.tail = node;
+}
+
+// Get from cache (returns ss_index or -1)
+int lru_get(const char* filename) {
+    LRUNode* current = lru_cache.head;
+    while (current) {
+        if (strcmp(current->filename, filename) == 0) {
+            lru_cache.hits++;
+            lru_move_to_front(current);
+            return current->ss_index;
+        }
+        current = current->next;
+    }
+    lru_cache.misses++;
+    return -1;
+}
+
+// Add to cache
+void lru_put(const char* filename, int ss_index) {
+    // Check if already exists
+    LRUNode* current = lru_cache.head;
+    while (current) {
+        if (strcmp(current->filename, filename) == 0) {
+            current->ss_index = ss_index;
+            lru_move_to_front(current);
+            return;
+        }
+        current = current->next;
+    }
+    
+    // Create new node
+    LRUNode* node = (LRUNode*)malloc(sizeof(LRUNode));
+    if (!node) return;
+    
+    strncpy(node->filename, filename, MAX_FILENAME_LEN - 1);
+    node->filename[MAX_FILENAME_LEN - 1] = '\0';
+    node->ss_index = ss_index;
+    node->prev = NULL;
+    node->next = lru_cache.head;
+    
+    if (lru_cache.head) lru_cache.head->prev = node;
+    lru_cache.head = node;
+    if (!lru_cache.tail) lru_cache.tail = node;
+    
+    lru_cache.size++;
+    
+    // Evict LRU if over capacity
+    if (lru_cache.size > LRU_CACHE_SIZE) {
+        LRUNode* old = lru_cache.tail;
+        lru_cache.tail = old->prev;
+        if (lru_cache.tail) lru_cache.tail->next = NULL;
+        else lru_cache.head = NULL;
+        free(old);
+        lru_cache.size--;
+    }
+}
+
+// Invalidate cache entry
+void lru_invalidate(const char* filename) {
+    LRUNode* current = lru_cache.head;
+    while (current) {
+        if (strcmp(current->filename, filename) == 0) {
+            if (current->prev) current->prev->next = current->next;
+            if (current->next) current->next->prev = current->prev;
+            if (current == lru_cache.head) lru_cache.head = current->next;
+            if (current == lru_cache.tail) lru_cache.tail = current->prev;
+            free(current);
+            lru_cache.size--;
+            return;
+        }
+        current = current->next;
     }
 }
 
@@ -115,6 +239,9 @@ unsigned int hash_string(const char* str) {
 // Add file to HashMap
 void hashmap_add(const char* filename, int ss_index) {
     unsigned int index = hash_string(filename);
+    
+    // Invalidate cache entry (file mapping changed)
+    lru_invalidate(filename);
     
     // Check if file already exists (update if so)
     HashNode* current = file_map.buckets[index];
@@ -167,6 +294,9 @@ int hashmap_find(const char* filename) {
 // Remove file from HashMap
 void hashmap_remove(const char* filename) {
     unsigned int index = hash_string(filename);
+    
+    // Invalidate cache entry
+    lru_invalidate(filename);
     
     HashNode* current = file_map.buckets[index];
     HashNode* prev = NULL;
@@ -222,12 +352,19 @@ void hashmap_stats() {
 }
 
 /* ============================================================================
- * FILE LOOKUP FUNCTIONS (Updated to use HashMap)
+ * FILE LOOKUP FUNCTIONS (LRU Cache + HashMap)
  * ============================================================================ */
 
 int find_ss_for_file(const char* filename) {
-    // Use O(1) HashMap lookup instead of O(N) linear search
-    return hashmap_find(filename);
+    // Check LRU cache first
+    int cached = lru_get(filename);
+    if (cached >= 0) return cached;
+    
+    // Cache miss - check HashMap
+    int ss_index = hashmap_find(filename);
+    if (ss_index >= 0) lru_put(filename, ss_index);
+    
+    return ss_index;
 }
 
 int find_available_ss() {
@@ -720,6 +857,179 @@ void handle_undo_request(int client_socket, Message* msg) {
     send_message(client_socket, &response);
 }
 
+void handle_stream_request(int client_socket, Message* msg) {
+    log_info("STREAM request from %s for file '%s'", msg->sender_id, msg->filename);
+    
+    // Check if file exists
+    int ss_index = find_ss_for_file(msg->filename);
+    if (ss_index < 0) {
+        log_warning("File '%s' not found", msg->filename);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content), 
+                 "File '%s' not found", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Check if user has read access
+    if (!acl_check_read(&acl_table, msg->filename, msg->sender_id)) {
+        log_warning("Access denied: %s attempted to stream '%s'", msg->sender_id, msg->filename);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_ACCESS_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                 "Access denied: You don't have permission to read '%s'", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Return SS routing info (client will connect directly to SS)
+    log_info("Routing STREAM to SS[%d] at %s:%d", 
+             ss_index, storage_servers[ss_index].base.ip, 
+             storage_servers[ss_index].base.client_port);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ROUTE_INFO;
+    response.error_code = ERR_SUCCESS;
+    strncpy(response.ss_ip, storage_servers[ss_index].base.ip, MAX_IP_LEN - 1);
+    response.ss_port = storage_servers[ss_index].base.client_port;
+    snprintf(response.content, sizeof(response.content),
+             "Connect to SS at %s:%d for STREAM", response.ss_ip, response.ss_port);
+    
+    send_message(client_socket, &response);
+}
+
+void handle_exec_request(int client_socket, Message* msg) {
+    log_info("EXEC request from %s for file '%s'", msg->sender_id, msg->filename);
+    
+    // Check if file exists
+    int ss_index = find_ss_for_file(msg->filename);
+    if (ss_index < 0) {
+        log_warning("File '%s' not found", msg->filename);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content), 
+                 "File '%s' not found", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Check if user has read access
+    if (!acl_check_read(&acl_table, msg->filename, msg->sender_id)) {
+        log_warning("Access denied: %s attempted to exec '%s'", msg->sender_id, msg->filename);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_ACCESS_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                 "Access denied: You don't have permission to read '%s'", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Request file content from SS
+    int ss_socket = create_socket();
+    if (ss_socket < 0 || connect_to_server(ss_socket, storage_servers[ss_index].base.ip, 
+                                            storage_servers[ss_index].base.nm_port) < 0) {
+        log_error("Failed to connect to SS for EXEC");
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_SS_UNAVAILABLE;
+        strcpy(response.content, "Storage server unavailable");
+        send_message(client_socket, &response);
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    // Request READ from SS
+    Message read_req;
+    INIT_MESSAGE(read_req);
+    read_req.operation = OP_READ;
+    strncpy(read_req.filename, msg->filename, MAX_FILENAME_LEN - 1);
+    send_message(ss_socket, &read_req);
+    
+    Message ss_response;
+    if (receive_message(ss_socket, &ss_response) <= 0 || ss_response.error_code != ERR_SUCCESS) {
+        close_socket(ss_socket);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.content, "Failed to read file from SS");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    // Execute file content as command
+    log_info("Executing content of file '%s'", msg->filename);
+    
+    char command[MAX_CONTENT_LEN];
+    strncpy(command, ss_response.content, MAX_CONTENT_LEN - 1);
+    command[MAX_CONTENT_LEN - 1] = '\0';
+    
+    // Use popen to capture output
+    FILE* fp = popen(command, "r");
+    if (fp == NULL) {
+        log_error("Failed to execute command");
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.content, "Failed to execute command");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Read command output
+    char output[MAX_CONTENT_LEN] = "";
+    char line[256];
+    size_t total_len = 0;
+    
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        size_t line_len = strlen(line);
+        if (total_len + line_len < MAX_CONTENT_LEN - 1) {
+            strcat(output, line);
+            total_len += line_len;
+        } else {
+            break;  // Buffer full
+        }
+    }
+    
+    int exit_status = pclose(fp);
+    
+    // Send result to client
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    if (exit_status == 0) {
+        response.error_code = ERR_SUCCESS;
+        if (strlen(output) > 0) {
+            strncpy(response.content, output, MAX_CONTENT_LEN - 1);
+        } else {
+            strcpy(response.content, "(command produced no output)");
+        }
+    } else {
+        response.error_code = ERR_SERVER_ERROR;
+        snprintf(response.content, sizeof(response.content),
+                 "Command failed with exit code %d. Output: %s", 
+                 exit_status, strlen(output) > 0 ? output : "(none)");
+    }
+    
+    send_message(client_socket, &response);
+    log_info("EXEC completed with status %d", exit_status);
+}
+
 /* ============================================================================
  * ACCESS CONTROL COMMAND HANDLERS
  * ============================================================================ */
@@ -1144,6 +1454,16 @@ void handle_connection(int conn_socket, char* client_ip, int client_port) {
             
         case OP_INFO:
             handle_info_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_STREAM:
+            handle_stream_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_EXEC:
+            handle_exec_request(conn_socket, &msg);
             close_socket(conn_socket);
             break;
             
