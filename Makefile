@@ -94,9 +94,24 @@ $(NS_DIR)/acl.o: $(NS_DIR)/acl.c $(NS_DIR)/acl.h $(COMMON_DIR)/protocol.h $(COMM
 
 storageserver: $(STORAGESERVER)
 
-$(STORAGESERVER): $(SS_DIR)/storage_server.c $(COMMON_OBJS)
+$(STORAGESERVER): $(SS_DIR)/storage_server.c $(SS_DIR)/sentence_lock.o $(SS_DIR)/sentence_parser.o $(SS_DIR)/undo_buffer.o $(COMMON_OBJS)
 	@echo "Building storage_server..."
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lpthread
+
+# Sentence lock module for storage server
+$(SS_DIR)/sentence_lock.o: $(SS_DIR)/sentence_lock.c $(SS_DIR)/sentence_lock.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
+	@echo "Building sentence_lock module..."
+	$(CC) $(CFLAGS) -c $(SS_DIR)/sentence_lock.c -o $@
+
+# Sentence parser module for storage server
+$(SS_DIR)/sentence_parser.o: $(SS_DIR)/sentence_parser.c $(SS_DIR)/sentence_parser.h $(COMMON_DIR)/logger.h
+	@echo "Building sentence_parser module..."
+	$(CC) $(CFLAGS) -c $(SS_DIR)/sentence_parser.c -o $@
+
+# Undo buffer module for storage server
+$(SS_DIR)/undo_buffer.o: $(SS_DIR)/undo_buffer.c $(SS_DIR)/undo_buffer.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
+	@echo "Building undo_buffer module..."
+	$(CC) $(CFLAGS) -c $(SS_DIR)/undo_buffer.c -o $@
 
 client: $(CLIENT)
 
@@ -148,6 +163,7 @@ clean:
 	@echo "Cleaning build files..."
 	@rm -f $(COMMON_DIR)/*.o
 	@rm -f $(NS_DIR)/*.o
+	@rm -f $(SS_DIR)/*.o
 	@rm -f $(TEST_SERVER) $(TEST_CLIENT)
 	@rm -f $(CLIENT) $(NAMESERVER) $(STORAGESERVER)
 	@rm -f acl_data.db

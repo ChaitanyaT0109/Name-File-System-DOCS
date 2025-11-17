@@ -627,6 +627,99 @@ void handle_delete_request(int client_socket, Message* msg) {
     send_message(client_socket, &ss_response);
 }
 
+void handle_write_request(int client_socket, Message* msg) {
+    log_info("WRITE request from %s for file '%s', sentence %d", 
+             msg->sender_id, msg->filename, msg->sentence_num);
+    
+    // Check if file exists
+    int ss_index = find_ss_for_file(msg->filename);
+    if (ss_index < 0) {
+        log_warning("File '%s' not found", msg->filename);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content), 
+                 "File '%s' not found", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Check if user has write access
+    if (!acl_check_write(&acl_table, msg->filename, msg->sender_id)) {
+        log_warning("Access denied: %s attempted to write '%s'", msg->sender_id, msg->filename);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_ACCESS_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                 "Access denied: You don't have permission to write '%s'", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Return SS routing info (client will connect directly to SS)
+    log_info("Routing WRITE to SS[%d] at %s:%d", 
+             ss_index, storage_servers[ss_index].base.ip, 
+             storage_servers[ss_index].base.client_port);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ROUTE_INFO;
+    response.error_code = ERR_SUCCESS;
+    strncpy(response.ss_ip, storage_servers[ss_index].base.ip, MAX_IP_LEN - 1);
+    response.ss_port = storage_servers[ss_index].base.client_port;
+    snprintf(response.content, sizeof(response.content),
+             "Connect to SS at %s:%d for WRITE", response.ss_ip, response.ss_port);
+    
+    send_message(client_socket, &response);
+}
+
+void handle_undo_request(int client_socket, Message* msg) {
+    log_info("UNDO request from %s for file '%s'", msg->sender_id, msg->filename);
+    
+    // Check if file exists
+    int ss_index = find_ss_for_file(msg->filename);
+    if (ss_index < 0) {
+        log_warning("File '%s' not found", msg->filename);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content), 
+                 "File '%s' not found", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Check if user has write access
+    if (!acl_check_write(&acl_table, msg->filename, msg->sender_id)) {
+        log_warning("Access denied: %s attempted to undo '%s'", msg->sender_id, msg->filename);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_ACCESS_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                 "Access denied: You don't have permission to undo '%s'", msg->filename);
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Return SS routing info (client will connect directly to SS)
+    log_info("Routing UNDO to SS[%d]", ss_index);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ROUTE_INFO;
+    response.error_code = ERR_SUCCESS;
+    strncpy(response.ss_ip, storage_servers[ss_index].base.ip, MAX_IP_LEN - 1);
+    response.ss_port = storage_servers[ss_index].base.client_port;
+    snprintf(response.content, sizeof(response.content),
+             "Connect to SS at %s:%d for UNDO", response.ss_ip, response.ss_port);
+    
+    send_message(client_socket, &response);
+}
+
 /* ============================================================================
  * ACCESS CONTROL COMMAND HANDLERS
  * ============================================================================ */
@@ -1016,6 +1109,16 @@ void handle_connection(int conn_socket, char* client_ip, int client_port) {
             
         case OP_DELETE:
             handle_delete_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_WRITE:
+            handle_write_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_UNDO:
+            handle_undo_request(conn_socket, &msg);
             close_socket(conn_socket);
             break;
             

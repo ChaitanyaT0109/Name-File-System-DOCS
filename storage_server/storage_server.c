@@ -19,6 +19,9 @@
 #include "socket_utils.h"
 #include "logger.h"
 #include "protocol.h"
+#include "sentence_lock.h"
+#include "sentence_parser.h"
+#include "undo_buffer.h"
 
 #define NS_IP "127.0.0.1"
 #define NS_PORT 8080
@@ -31,6 +34,10 @@ int ns_socket = -1;             // Outbound socket to NS (for registration/heart
 int nm_server_socket = -1;      // Inbound socket for NS forwarded requests (8081)
 int client_server_socket = -1;  // Inbound socket for client requests (8082)
 char local_ip[MAX_IP_LEN];
+
+// WRITE operation state
+LockTable lock_table;
+UndoBuffer undo_buffer;
 
 /* ============================================================================
  * FILE OPERATIONS (Original code retained)
@@ -303,7 +310,289 @@ int register_with_nameserver(char files[][MAX_FILENAME_LEN], int file_count) {
 
 
 /* ============================================================================
- * REQUEST HANDLERS (Modified/Simplified)
+ * WRITE OPERATION - Sentence-level atomic write with locking
+ * ============================================================================ */
+
+typedef struct {
+    char filename[MAX_FILENAME_LEN];
+    int sentence_num;
+    char client_id[MAX_USERNAME_LEN];
+    char** words;
+    int word_count;
+    int active;
+} WriteSession;
+
+WriteSession write_session = {0};
+
+void handle_write_session(int client_socket, Message* msg) {
+    Message response;
+    INIT_MESSAGE(response);
+    
+    if (msg->operation == OP_WRITE_START) {
+        // Start WRITE session - acquire lock
+        log_info("WRITE_START: file=%s, sentence=%d, client=%s", 
+                 msg->filename, msg->sentence_num, msg->sender_id);
+        
+        // Check file exists
+        if (!file_exists(msg->filename)) {
+            response.error_code = ERR_NOT_FOUND;
+            strcpy(response.content, "File not found");
+            send_message(client_socket, &response);
+            return;
+        }
+        
+        // Try to acquire lock
+        int lock_result = lock_acquire(&lock_table, msg->filename, msg->sentence_num, msg->sender_id);
+        
+        if (lock_result == ERR_LOCKED) {
+            response.error_code = ERR_LOCKED;
+            strcpy(response.content, "Sentence locked by another user");
+            send_message(client_socket, &response);
+            return;
+        }
+        
+        // Read file and parse sentences
+        char file_content[MAX_CONTENT_LEN];
+        int read_result = read_file(msg->filename, file_content, sizeof(file_content));
+        
+        if (read_result != ERR_SUCCESS) {
+            lock_release(&lock_table, msg->filename, msg->sentence_num, msg->sender_id);
+            response.error_code = read_result;
+            strcpy(response.content, "Failed to read file");
+            send_message(client_socket, &response);
+            return;
+        }
+        
+        char** sentences;
+        int sentence_count = parse_sentences(file_content, &sentences);
+        
+        if (msg->sentence_num < 0 || msg->sentence_num >= sentence_count) {
+            free_sentences(sentences, sentence_count);
+            lock_release(&lock_table, msg->filename, msg->sentence_num, msg->sender_id);
+            response.error_code = ERR_INDEX_ERROR;
+            snprintf(response.content, sizeof(response.content),
+                    "Invalid sentence number %d (file has %d sentences)", 
+                    msg->sentence_num, sentence_count);
+            send_message(client_socket, &response);
+            return;
+        }
+        
+        // Parse target sentence into words
+        char** words;
+        int word_count = parse_words(sentences[msg->sentence_num], &words);
+        
+        // Initialize write session
+        strncpy(write_session.filename, msg->filename, MAX_FILENAME_LEN - 1);
+        write_session.sentence_num = msg->sentence_num;
+        strncpy(write_session.client_id, msg->sender_id, MAX_USERNAME_LEN - 1);
+        write_session.words = words;
+        write_session.word_count = word_count;
+        write_session.active = 1;
+        
+        free_sentences(sentences, sentence_count);
+        
+        // Save to undo buffer
+        undo_save(&undo_buffer, msg->filename, file_content, strlen(file_content));
+        
+        response.error_code = ERR_SUCCESS;
+        snprintf(response.content, sizeof(response.content),
+                "Lock acquired. Sentence has %d words. Send word updates.", word_count);
+        send_message(client_socket, &response);
+        log_info("WRITE session started successfully");
+        
+    } else if (msg->operation == OP_WRITE_UPDATE) {
+        // Update word in session
+        if (!write_session.active) {
+            response.error_code = ERR_BAD_REQUEST;
+            strcpy(response.content, "No active WRITE session");
+            send_message(client_socket, &response);
+            return;
+        }
+        
+        int word_idx = msg->word_index;
+        const char* new_word = msg->content;
+        
+        log_info("WRITE_UPDATE: word_idx=%d, new_word='%s'", word_idx, new_word);
+        
+        // Validate index
+        if (word_idx < 0 || word_idx > write_session.word_count) {
+            response.error_code = ERR_INDEX_ERROR;
+            snprintf(response.content, sizeof(response.content),
+                    "Invalid word index %d (sentence has %d words)", 
+                    word_idx, write_session.word_count);
+            send_message(client_socket, &response);
+            return;
+        }
+        
+        // Insert word (creates new array)
+        char** new_words = malloc((write_session.word_count + 1) * sizeof(char*));
+        
+        for (int i = 0; i < word_idx; i++) {
+            new_words[i] = strdup(write_session.words[i]);
+        }
+        
+        new_words[word_idx] = strdup(new_word);
+        
+        for (int i = word_idx; i < write_session.word_count; i++) {
+            new_words[i + 1] = strdup(write_session.words[i]);
+        }
+        
+        // Free old words
+        free_words(write_session.words, write_session.word_count);
+        
+        write_session.words = new_words;
+        write_session.word_count++;
+        
+        response.error_code = ERR_SUCCESS;
+        snprintf(response.content, sizeof(response.content),
+                "Word inserted at index %d. Sentence now has %d words.", 
+                word_idx, write_session.word_count);
+        send_message(client_socket, &response);
+        log_info("Word update applied to session");
+        
+    } else if (msg->operation == OP_WRITE_COMMIT) {
+        // ETIRW - commit changes atomically
+        if (!write_session.active) {
+            response.error_code = ERR_BAD_REQUEST;
+            strcpy(response.content, "No active WRITE session");
+            send_message(client_socket, &response);
+            return;
+        }
+        
+        log_info("WRITE_COMMIT: Committing changes atomically");
+        
+        // Read full file again
+        char file_content[MAX_CONTENT_LEN];
+        read_file(write_session.filename, file_content, sizeof(file_content));
+        
+        char** sentences;
+        int sentence_count = parse_sentences(file_content, &sentences);
+        
+        // Rebuild sentence from words
+        char new_sentence[MAX_CONTENT_LEN] = "";
+        for (int i = 0; i < write_session.word_count; i++) {
+            strcat(new_sentence, write_session.words[i]);
+            if (i < write_session.word_count - 1) {
+                strcat(new_sentence, " ");
+            }
+        }
+        
+        // Check for delimiters in new sentence - handle splits
+        if (has_delimiter(new_sentence)) {
+            char** parts;
+            int part_count = split_by_delimiters(new_sentence, &parts);
+            
+            log_info("Sentence split into %d parts due to delimiters", part_count);
+            
+            // Replace old sentence with new parts
+            char** new_sentences = malloc((sentence_count - 1 + part_count) * sizeof(char*));
+            int new_idx = 0;
+            
+            for (int i = 0; i < write_session.sentence_num; i++) {
+                new_sentences[new_idx++] = strdup(sentences[i]);
+            }
+            
+            for (int i = 0; i < part_count; i++) {
+                new_sentences[new_idx++] = strdup(parts[i]);
+            }
+            
+            for (int i = write_session.sentence_num + 1; i < sentence_count; i++) {
+                new_sentences[new_idx++] = strdup(sentences[i]);
+            }
+            
+            free_sentences(sentences, sentence_count);
+            free_sentences(parts, part_count);
+            
+            sentences = new_sentences;
+            sentence_count = new_idx;
+        } else {
+            // No split - simple replacement
+            free(sentences[write_session.sentence_num]);
+            sentences[write_session.sentence_num] = strdup(new_sentence);
+        }
+        
+        // Rebuild file
+        char* new_content = rebuild_file(sentences, sentence_count);
+        
+        // Write atomically using temp file
+        char filepath[MAX_PATH_LEN];
+        char temp_filepath[MAX_PATH_LEN];
+        get_file_path(write_session.filename, filepath);
+        snprintf(temp_filepath, sizeof(temp_filepath), "%s.tmp", filepath);
+        
+        FILE* fp = fopen(temp_filepath, "w");
+        if (!fp) {
+            free(new_content);
+            free_sentences(sentences, sentence_count);
+            lock_release(&lock_table, write_session.filename, write_session.sentence_num, write_session.client_id);
+            write_session.active = 0;
+            response.error_code = ERR_SERVER_ERROR;
+            strcpy(response.content, "Failed to write temp file");
+            send_message(client_socket, &response);
+            return;
+        }
+        
+        fwrite(new_content, 1, strlen(new_content), fp);
+        fclose(fp);
+        
+        // Atomic rename
+        rename(temp_filepath, filepath);
+        
+        free(new_content);
+        free_sentences(sentences, sentence_count);
+        
+        // Release lock
+        lock_release(&lock_table, write_session.filename, write_session.sentence_num, write_session.client_id);
+        
+        // Clean up session
+        free_words(write_session.words, write_session.word_count);
+        write_session.active = 0;
+        
+        response.error_code = ERR_SUCCESS;
+        strcpy(response.content, "WRITE committed successfully");
+        send_message(client_socket, &response);
+        log_info("WRITE committed and lock released");
+    }
+}
+
+void handle_undo_request(int client_socket, Message* msg) {
+    log_info("UNDO request for file '%s'", msg->filename);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    
+    if (!undo_available(&undo_buffer, msg->filename)) {
+        response.error_code = ERR_NOT_FOUND;
+        strcpy(response.content, "No undo available for this file");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Write undo content back to file
+    char filepath[MAX_PATH_LEN];
+    get_file_path(msg->filename, filepath);
+    
+    FILE* fp = fopen(filepath, "w");
+    if (!fp) {
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.content, "Failed to restore file");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    fwrite(undo_buffer.content, 1, undo_buffer.size, fp);
+    fclose(fp);
+    
+    undo_clear(&undo_buffer);
+    
+    response.error_code = ERR_SUCCESS;
+    strcpy(response.content, "File restored from undo buffer");
+    send_message(client_socket, &response);
+    log_info("UNDO completed for file '%s'", msg->filename);
+}
+
+/* ============================================================================
+ * REQUEST HANDLERS (Original code retained)
  * ============================================================================ */
 
 void handle_read_from_client(int client_socket, Message* msg) {
@@ -465,6 +754,16 @@ void* client_server_thread(void* arg) {
                 handle_read_from_client(client_socket, &msg);
                 break;
                 
+            case OP_WRITE_START:
+            case OP_WRITE_UPDATE:
+            case OP_WRITE_COMMIT:
+                handle_write_session(client_socket, &msg);
+                break;
+                
+            case OP_UNDO:
+                handle_undo_request(client_socket, &msg);
+                break;
+                
             default:
                 log_warning("Unknown operation from client: %d", msg.operation);
                 Message response;
@@ -483,13 +782,26 @@ void* client_server_thread(void* arg) {
     return NULL;
 }
 
+// Background thread to cleanup expired locks
+void* lock_cleanup_thread(void* arg) {
+    (void)arg;
+    log_info("Lock cleanup thread started");
+    
+    while (1) {
+        sleep(30);  // Check every 30 seconds
+        lock_cleanup_expired(&lock_table);
+    }
+    
+    return NULL;
+}
+
 
 /* ============================================================================
  * MAIN (Modified for Correct Order and SO_REUSEADDR)
  * ============================================================================ */
 
 int main() {
-    pthread_t ns_thread, client_thread;
+    pthread_t ns_thread, client_thread, cleanup_thread;
     int opt = 1; // Used for SO_REUSEADDR option
     
     // Initialize logger and prerequisites
@@ -497,6 +809,10 @@ int main() {
     log_info("============================================================");
     log_info("Storage Server Starting - Docs++ Distributed Document System");
     log_info("============================================================");
+    
+    // Initialize WRITE components
+    lock_table_init(&lock_table);
+    undo_buffer_init(&undo_buffer);
     
     get_local_ip(local_ip);
     log_info("Local IP: %s", local_ip);
@@ -592,6 +908,13 @@ int main() {
     }
     log_info("Client server thread created (listening on %d)", SS_CLIENT_PORT);
     
+    // Start lock cleanup thread
+    if (pthread_create(&cleanup_thread, NULL, lock_cleanup_thread, NULL) != 0) {
+        log_warning("Failed to create lock cleanup thread (non-critical)");
+    } else {
+        log_info("Lock cleanup thread created");
+    }
+    
     log_info("============================================================");
     log_info("Storage Server running and ready to serve requests");
     log_info("============================================================");
@@ -599,6 +922,9 @@ int main() {
     pthread_join(ns_thread, NULL);
     pthread_join(client_thread, NULL);
     
+    // Cleanup
+    lock_table_destroy(&lock_table);
+    undo_buffer_destroy(&undo_buffer);
     close_socket(nm_server_socket);
     close_socket(client_server_socket);
     close_logger();

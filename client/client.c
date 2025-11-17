@@ -649,6 +649,281 @@ void cmd_remaccess(const char* filename, const char* username) {
     close_socket(ns_socket);
 }
 
+void cmd_write(const char* filename, const char* sentence_num_str) {
+    if (!filename || strlen(filename) == 0) {
+        printf("Error: Filename required\n");
+        printf("Usage: WRITE <filename> <sentence_num>\n");
+        return;
+    }
+    
+    if (!sentence_num_str || strlen(sentence_num_str) == 0) {
+        printf("Error: Sentence number required\n");
+        printf("Usage: WRITE <filename> <sentence_num>\n");
+        return;
+    }
+    
+    int sentence_num = atoi(sentence_num_str);
+    if (sentence_num < 0) {
+        printf("Error: Invalid sentence number\n");
+        return;
+    }
+    
+    log_info("WRITE command: file=%s, sentence=%d", filename, sentence_num);
+    
+    // Step 1: Contact NS to get SS routing info
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_WRITE;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    msg.sentence_num = sentence_num;
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: No response from Name Server\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code != ERR_SUCCESS) {
+        printf("Error: %s\n", response.content);
+        return;
+    }
+    
+    // Step 2: Connect to SS
+    char ss_ip[MAX_IP_LEN];
+    int ss_port = response.ss_port;
+    strncpy(ss_ip, response.ss_ip, MAX_IP_LEN - 1);
+    
+    printf("Connecting to Storage Server at %s:%d...\n", ss_ip, ss_port);
+    
+    int ss_socket = create_socket();
+    if (ss_socket < 0 || connect_to_server(ss_socket, ss_ip, ss_port) < 0) {
+        printf("Error: Failed to connect to Storage Server\n");
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    // Step 3: Start WRITE session (acquire lock)
+    Message write_start;
+    INIT_MESSAGE(write_start);
+    write_start.operation = OP_WRITE_START;
+    strncpy(write_start.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(write_start.filename, filename, MAX_FILENAME_LEN - 1);
+    write_start.sentence_num = sentence_num;
+    
+    send_message(ss_socket, &write_start);
+    
+    Message start_response;
+    if (receive_message(ss_socket, &start_response) <= 0) {
+        printf("Error: No response from Storage Server\n");
+        close_socket(ss_socket);
+        return;
+    }
+    
+    if (start_response.error_code != ERR_SUCCESS) {
+        printf("Error: %s\n", start_response.content);
+        close_socket(ss_socket);
+        return;
+    }
+    
+    printf("Lock acquired! %s\n", start_response.content);
+    printf("\nWRITE Session Active\n");
+    printf("═══════════════════════════════════════════════════════════════\n");
+    printf("Enter word updates in format: <word_index> <word_content>\n");
+    printf("Type 'ETIRW' to commit changes, or 'CANCEL' to abort\n");
+    printf("═══════════════════════════════════════════════════════════════\n");
+    
+    // Step 4: Interactive loop for word updates
+    char input_line[MAX_INPUT];
+    int updates_made = 0;
+    
+    while (1) {
+        printf("\nwrite> ");
+        fflush(stdout);
+        
+        if (fgets(input_line, sizeof(input_line), stdin) == NULL) {
+            break;
+        }
+        
+        trim(input_line);
+        
+        if (strlen(input_line) == 0) {
+            continue;
+        }
+        
+        // Check for commit
+        if (strcmp(input_line, "ETIRW") == 0 || strcmp(input_line, "etirw") == 0) {
+            // Commit changes
+            Message commit_msg;
+            INIT_MESSAGE(commit_msg);
+            commit_msg.operation = OP_WRITE_COMMIT;
+            strncpy(commit_msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+            strncpy(commit_msg.filename, filename, MAX_FILENAME_LEN - 1);
+            commit_msg.sentence_num = sentence_num;
+            
+            send_message(ss_socket, &commit_msg);
+            
+            Message commit_response;
+            if (receive_message(ss_socket, &commit_response) <= 0) {
+                printf("Error: Failed to commit changes\n");
+            } else if (commit_response.error_code == ERR_SUCCESS) {
+                printf("✓ Changes committed successfully!\n");
+                printf("  Total updates made: %d\n", updates_made);
+            } else {
+                printf("Error: %s\n", commit_response.content);
+            }
+            
+            close_socket(ss_socket);
+            return;
+        }
+        
+        // Check for cancel
+        if (strcmp(input_line, "CANCEL") == 0 || strcmp(input_line, "cancel") == 0) {
+            printf("Write session cancelled (lock will timeout)\n");
+            close_socket(ss_socket);
+            return;
+        }
+        
+        // Parse word update: <word_idx> <content>
+        char* space_pos = strchr(input_line, ' ');
+        if (!space_pos) {
+            printf("Error: Invalid format. Use: <word_index> <word_content>\n");
+            continue;
+        }
+        
+        *space_pos = '\0';
+        int word_idx = atoi(input_line);
+        const char* word_content = space_pos + 1;
+        
+        if (word_idx < 0) {
+            printf("Error: Invalid word index\n");
+            continue;
+        }
+        
+        if (strlen(word_content) == 0) {
+            printf("Error: Word content cannot be empty\n");
+            continue;
+        }
+        
+        // Send update to SS
+        Message update_msg;
+        INIT_MESSAGE(update_msg);
+        update_msg.operation = OP_WRITE_UPDATE;
+        strncpy(update_msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+        strncpy(update_msg.filename, filename, MAX_FILENAME_LEN - 1);
+        update_msg.sentence_num = sentence_num;
+        update_msg.word_index = word_idx;
+        strncpy(update_msg.content, word_content, MAX_CONTENT_LEN - 1);
+        
+        send_message(ss_socket, &update_msg);
+        
+        Message update_response;
+        if (receive_message(ss_socket, &update_response) <= 0) {
+            printf("Error: No response from Storage Server\n");
+            close_socket(ss_socket);
+            return;
+        }
+        
+        if (update_response.error_code == ERR_SUCCESS) {
+            printf("✓ %s\n", update_response.content);
+            updates_made++;
+        } else {
+            printf("✗ Error: %s\n", update_response.content);
+        }
+    }
+    
+    close_socket(ss_socket);
+}
+
+void cmd_undo(const char* filename) {
+    if (!filename || strlen(filename) == 0) {
+        printf("Error: Filename required\n");
+        printf("Usage: UNDO <filename>\n");
+        return;
+    }
+    
+    log_info("UNDO command: file=%s", filename);
+    
+    // Step 1: Contact NS to get SS routing info
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_UNDO;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: No response from Name Server\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code != ERR_SUCCESS) {
+        printf("Error: %s\n", response.content);
+        return;
+    }
+    
+    // Step 2: Connect to SS
+    char ss_ip[MAX_IP_LEN];
+    int ss_port = response.ss_port;
+    strncpy(ss_ip, response.ss_ip, MAX_IP_LEN - 1);
+    
+    int ss_socket = create_socket();
+    if (ss_socket < 0 || connect_to_server(ss_socket, ss_ip, ss_port) < 0) {
+        printf("Error: Failed to connect to Storage Server\n");
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    // Step 3: Send UNDO request
+    Message undo_msg;
+    INIT_MESSAGE(undo_msg);
+    undo_msg.operation = OP_UNDO;
+    strncpy(undo_msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(undo_msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    send_message(ss_socket, &undo_msg);
+    
+    Message undo_response;
+    if (receive_message(ss_socket, &undo_response) <= 0) {
+        printf("Error: No response from Storage Server\n");
+        close_socket(ss_socket);
+        return;
+    }
+    
+    if (undo_response.error_code == ERR_SUCCESS) {
+        printf("✓ File restored: %s\n", undo_response.content);
+    } else {
+        printf("Error: %s\n", undo_response.content);
+    }
+    
+    close_socket(ss_socket);
+    log_info("UNDO completed");
+}
+
 void cmd_help() {
     printf("\n");
     printf("Available Commands:\n");
@@ -656,7 +931,9 @@ void cmd_help() {
     printf("  File Operations:\n");
     printf("    CREATE <filename>                - Create a new file\n");
     printf("    READ <filename>                  - Read and display file content\n");
+    printf("    WRITE <filename> <sentence_num>  - Edit words in a sentence\n");
     printf("    DELETE <filename>                - Delete a file\n");
+    printf("    UNDO <filename>                  - Restore file to previous state\n");
     printf("\n");
     printf("  File Information:\n");
     printf("    VIEW                             - List files you can access\n");
@@ -681,6 +958,8 @@ void cmd_help() {
     printf("Examples:\n");
     printf("  CREATE mydoc.txt\n");
     printf("  READ mydoc.txt\n");
+    printf("  WRITE mydoc.txt 0\n");
+    printf("  UNDO mydoc.txt\n");
     printf("  VIEW -l\n");
     printf("  INFO mydoc.txt\n");
     printf("  ADDACCESS -R mydoc.txt alice\n");
@@ -766,8 +1045,12 @@ int main() {
             cmd_create(arg1);
         } else if (strcmp(command, "READ") == 0) {
             cmd_read(arg1);
+        } else if (strcmp(command, "WRITE") == 0) {
+            cmd_write(arg1, arg2);
         } else if (strcmp(command, "DELETE") == 0) {
             cmd_delete(arg1);
+        } else if (strcmp(command, "UNDO") == 0) {
+            cmd_undo(arg1);
         } else if (strcmp(command, "LIST") == 0) {
             cmd_list();
         } else if (strcmp(command, "VIEW") == 0) {
