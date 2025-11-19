@@ -23,11 +23,12 @@
 #include "sentence_parser.h"
 #include "undo_buffer.h"
 
-#define NS_IP "127.0.0.1"
-#define NS_PORT 8080
-#define SS_NM_PORT 8081        // Port for NS communication (inbound)
-#define SS_CLIENT_PORT 8082    // Port for client communication (inbound)
-#define STORAGE_DIR "./storage"
+// Configurable via command-line arguments
+static char NS_IP[MAX_IP_LEN] = "192.168.1.187";  // Name Server IP
+static int NS_PORT = 8080;                         // Name Server port
+static int SS_NM_PORT = 8081;                      // Port for NS communication (inbound)
+static int SS_CLIENT_PORT = 8082;                  // Port for client communication (inbound)
+static char STORAGE_DIR[MAX_PATH_LEN] = "./storage";  // Storage directory
 
 // Global state
 int ns_socket = -1;             // Outbound socket to NS (for registration/heartbeat)
@@ -37,7 +38,7 @@ char local_ip[MAX_IP_LEN];
 
 // WRITE operation state
 LockTable lock_table;
-UndoBuffer undo_buffer;
+UndoTable undo_table;  // Changed from UndoBuffer to UndoTable
 
 /* ============================================================================
  * FILE OPERATIONS (Original code retained)
@@ -366,7 +367,9 @@ void handle_write_session(int client_socket, Message* msg) {
         char** sentences;
         int sentence_count = parse_sentences(file_content, &sentences);
         
-        if (msg->sentence_num < 0 || msg->sentence_num >= sentence_count) {
+        // Special case: Allow WRITE 0 on empty file (sentence_count == 0)
+        if (msg->sentence_num < 0 || (sentence_count > 0 && msg->sentence_num >= sentence_count) || 
+            (sentence_count == 0 && msg->sentence_num > 0)) {
             free_sentences(sentences, sentence_count);
             lock_release(&lock_table, msg->filename, msg->sentence_num, msg->sender_id);
             response.error_code = ERR_INDEX_ERROR;
@@ -379,7 +382,15 @@ void handle_write_session(int client_socket, Message* msg) {
         
         // Parse target sentence into words
         char** words;
-        int word_count = parse_words(sentences[msg->sentence_num], &words);
+        int word_count;
+        
+        if (sentence_count == 0 && msg->sentence_num == 0) {
+            // Empty file - initialize with empty word list
+            words = NULL;
+            word_count = 0;
+        } else {
+            word_count = parse_words(sentences[msg->sentence_num], &words);
+        }
         
         // Initialize write session
         strncpy(write_session.filename, msg->filename, MAX_FILENAME_LEN - 1);
@@ -391,8 +402,8 @@ void handle_write_session(int client_socket, Message* msg) {
         
         free_sentences(sentences, sentence_count);
         
-        // Save to undo buffer
-        undo_save(&undo_buffer, msg->filename, file_content, strlen(file_content));
+        // Save to undo buffer (per-file)
+        undo_save(&undo_table, msg->filename, file_content, strlen(file_content));
         
         response.error_code = ERR_SUCCESS;
         snprintf(response.content, sizeof(response.content),
@@ -477,8 +488,24 @@ void handle_write_session(int client_socket, Message* msg) {
             }
         }
         
+        // Special case: Empty file (sentence_count == 0)
+        if (sentence_count == 0) {
+            // Add the new sentence as the first sentence
+            if (has_delimiter(new_sentence)) {
+                // Split by delimiters
+                char** parts;
+                int part_count = split_by_delimiters(new_sentence, &parts);
+                sentences = parts;
+                sentence_count = part_count;
+            } else {
+                // Single sentence
+                sentences = malloc(sizeof(char*));
+                sentences[0] = strdup(new_sentence);
+                sentence_count = 1;
+            }
+        }
         // Check for delimiters in new sentence - handle splits
-        if (has_delimiter(new_sentence)) {
+        else if (has_delimiter(new_sentence)) {
             char** parts;
             int part_count = split_by_delimiters(new_sentence, &parts);
             
@@ -561,29 +588,44 @@ void handle_undo_request(int client_socket, Message* msg) {
     Message response;
     INIT_MESSAGE(response);
     
-    if (!undo_available(&undo_buffer, msg->filename)) {
+    // Check if undo is available for this file
+    if (!undo_available(&undo_table, msg->filename)) {
         response.error_code = ERR_NOT_FOUND;
         strcpy(response.content, "No undo available for this file");
         send_message(client_socket, &response);
         return;
     }
     
-    // Write undo content back to file
+    // Restore content from undo buffer
+    char* restore_content = NULL;
+    size_t restore_size = 0;
+    
+    int restore_result = undo_restore(&undo_table, msg->filename, &restore_content, &restore_size);
+    
+    if (restore_result != ERR_SUCCESS) {
+        response.error_code = restore_result;
+        strcpy(response.content, "Failed to restore from undo buffer");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Write restored content back to file
     char filepath[MAX_PATH_LEN];
     get_file_path(msg->filename, filepath);
     
     FILE* fp = fopen(filepath, "w");
     if (!fp) {
+        free(restore_content);
         response.error_code = ERR_SERVER_ERROR;
-        strcpy(response.content, "Failed to restore file");
+        strcpy(response.content, "Failed to write restored file");
         send_message(client_socket, &response);
         return;
     }
     
-    fwrite(undo_buffer.content, 1, undo_buffer.size, fp);
+    fwrite(restore_content, 1, restore_size, fp);
     fclose(fp);
     
-    undo_clear(&undo_buffer);
+    free(restore_content);
     
     response.error_code = ERR_SUCCESS;
     strcpy(response.content, "File restored from undo buffer");
@@ -828,35 +870,78 @@ void* client_server_thread(void* arg) {
         
         log_info("Received request from client: %s", get_operation_name(msg.operation));
         
-        // Handle based on operation
-        switch (msg.operation) {
-            case OP_READ:
-                handle_read_from_client(client_socket, &msg);
-                break;
+        // Special handling for WRITE sessions - keep connection alive
+        if (msg.operation == OP_WRITE_START) {
+            // Handle WRITE_START
+            handle_write_session(client_socket, &msg);
+            
+            // Keep connection alive for subsequent WRITE_UPDATE and WRITE_COMMIT
+            while (1) {
+                Message write_msg;
+                int bytes = receive_message(client_socket, &write_msg);
                 
-            case OP_WRITE_START:
-            case OP_WRITE_UPDATE:
-            case OP_WRITE_COMMIT:
-                handle_write_session(client_socket, &msg);
-                break;
+                if (bytes <= 0) {
+                    log_warning("Client disconnected during WRITE session");
+                    // Clean up session if still active
+                    if (write_session.active) {
+                        lock_release(&lock_table, write_session.filename, 
+                                   write_session.sentence_num, write_session.client_id);
+                        free_words(write_session.words, write_session.word_count);
+                        write_session.active = 0;
+                    }
+                    break;
+                }
                 
-            case OP_UNDO:
-                handle_undo_request(client_socket, &msg);
-                break;
+                log_info("Received WRITE operation: %s", get_operation_name(write_msg.operation));
                 
-            case OP_STREAM:
-                handle_stream_request(client_socket, &msg);
-                break;
-                
-            default:
-                log_warning("Unknown operation from client: %d", msg.operation);
-                Message response;
-                INIT_MESSAGE(response);
-                response.operation = OP_ACK;
-                response.error_code = ERR_NOT_IMPLEMENTED;
-                strcpy(response.content, "Operation not implemented");
-                send_message(client_socket, &response);
-                break;
+                if (write_msg.operation == OP_WRITE_UPDATE) {
+                    handle_write_session(client_socket, &write_msg);
+                } else if (write_msg.operation == OP_WRITE_COMMIT) {
+                    handle_write_session(client_socket, &write_msg);
+                    // WRITE_COMMIT ends the session
+                    break;
+                } else {
+                    log_warning("Unexpected operation during WRITE session: %d", write_msg.operation);
+                    break;
+                }
+            }
+        } else {
+            // Handle other operations normally (single message per connection)
+            switch (msg.operation) {
+                case OP_READ:
+                    handle_read_from_client(client_socket, &msg);
+                    break;
+                    
+                case OP_WRITE_UPDATE:
+                case OP_WRITE_COMMIT:
+                    // These should only come after WRITE_START
+                    log_warning("Received %s without WRITE_START", get_operation_name(msg.operation));
+                    Message response;
+                    INIT_MESSAGE(response);
+                    response.operation = OP_ACK;
+                    response.error_code = ERR_BAD_REQUEST;
+                    strcpy(response.content, "No active WRITE session");
+                    send_message(client_socket, &response);
+                    break;
+                    
+                case OP_UNDO:
+                    handle_undo_request(client_socket, &msg);
+                    break;
+                    
+                case OP_STREAM:
+                    handle_stream_request(client_socket, &msg);
+                    break;
+                    
+                default:
+                    log_warning("Unknown operation from client: %d", msg.operation);
+                    Message err_response;
+                    INIT_MESSAGE(err_response);
+                    err_response.operation = OP_ACK;
+                    err_response.error_code = ERR_NOT_IMPLEMENTED;
+                    strcpy(err_response.content, "Operation not implemented");
+                    send_message(client_socket, &err_response);
+                    break;
+            }
         }
         
         close_socket(client_socket);
@@ -884,19 +969,60 @@ void* lock_cleanup_thread(void* arg) {
  * MAIN (Modified for Correct Order and SO_REUSEADDR)
  * ============================================================================ */
 
-int main() {
+int main(int argc, char* argv[]) {
     pthread_t ns_thread, client_thread, cleanup_thread;
     int opt = 1; // Used for SO_REUSEADDR option
     
+    // Parse command-line arguments
+    if (argc >= 4) {
+        // Format: ./storage_server <ns_ip> <nm_port> <client_port> [storage_dir]
+        strncpy(NS_IP, argv[1], MAX_IP_LEN - 1);
+        SS_NM_PORT = atoi(argv[2]);
+        SS_CLIENT_PORT = atoi(argv[3]);
+        
+        if (argc >= 5) {
+            strncpy(STORAGE_DIR, argv[4], MAX_PATH_LEN - 1);
+        } else {
+            // Auto-generate storage directory based on port
+            snprintf(STORAGE_DIR, MAX_PATH_LEN, "./storage_%d", SS_NM_PORT);
+        }
+        
+        printf("=============================================================\n");
+        printf("Storage Server - Custom Configuration\n");
+        printf("=============================================================\n");
+        printf("Name Server IP:       %s:%d\n", NS_IP, NS_PORT);
+        printf("NS Communication:     Port %d\n", SS_NM_PORT);
+        printf("Client Communication: Port %d\n", SS_CLIENT_PORT);
+        printf("Storage Directory:    %s\n", STORAGE_DIR);
+        printf("=============================================================\n");
+    } else {
+        printf("=============================================================\n");
+        printf("Storage Server - Default Configuration\n");
+        printf("=============================================================\n");
+        printf("Name Server IP:       %s:%d\n", NS_IP, NS_PORT);
+        printf("NS Communication:     Port %d\n", SS_NM_PORT);
+        printf("Client Communication: Port %d\n", SS_CLIENT_PORT);
+        printf("Storage Directory:    %s\n", STORAGE_DIR);
+        printf("=============================================================\n");
+        printf("Usage: %s <ns_ip> <nm_port> <client_port> [storage_dir]\n", argv[0]);
+        printf("Example: %s 192.168.1.187 9081 9082 ./storage_9081\n", argv[0]);
+        printf("=============================================================\n\n");
+    }
+    
     // Initialize logger and prerequisites
-    init_logger("SS", "logs/storage_server.log");
+    char log_filename[512];
+    snprintf(log_filename, sizeof(log_filename), "logs/storage_server_%d.log", SS_NM_PORT);
+    init_logger("SS", log_filename);
     log_info("============================================================");
     log_info("Storage Server Starting - Docs++ Distributed Document System");
     log_info("============================================================");
+    log_info("Configuration: NS_IP=%s NS_PORT=%d SS_NM_PORT=%d SS_CLIENT_PORT=%d", 
+             NS_IP, NS_PORT, SS_NM_PORT, SS_CLIENT_PORT);
+    log_info("Storage Directory: %s", STORAGE_DIR);
     
     // Initialize WRITE components
     lock_table_init(&lock_table);
-    undo_buffer_init(&undo_buffer);
+    undo_table_init(&undo_table);  // Changed from undo_buffer_init
     
     get_local_ip(local_ip);
     log_info("Local IP: %s", local_ip);
@@ -1008,7 +1134,7 @@ int main() {
     
     // Cleanup
     lock_table_destroy(&lock_table);
-    undo_buffer_destroy(&undo_buffer);
+    undo_table_destroy(&undo_table);  // Changed from undo_buffer_destroy
     close_socket(nm_server_socket);
     close_socket(client_server_socket);
     close_logger();

@@ -17,17 +17,19 @@
 #include <string.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <signal.h>
 #include "socket_utils.h"
 #include "logger.h"
 #include "protocol.h"
 
-#define NS_IP "127.0.0.1"
+#define NS_IP "192.168.1.187"  // Friend's IP (where Name Server is)
 #define NS_PORT 8080
 #define MAX_INPUT 1024
 
 // Global state
 char current_username[MAX_USERNAME_LEN];
 char local_ip[MAX_IP_LEN];
+volatile sig_atomic_t should_exit = 0;  // Flag for graceful shutdown
 
 /* ============================================================================
  * UTILITY FUNCTIONS
@@ -160,6 +162,44 @@ int register_with_nameserver() {
     
     close_socket(ns_socket);
     return 0;
+}
+
+void unregister_from_nameserver() {
+    log_info("Unregistering from Name Server");
+    
+    // Create socket
+    int ns_socket = create_socket();
+    if (ns_socket < 0) {
+        return;  // Silently fail during cleanup
+    }
+    
+    // Connect to NS
+    if (connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        close_socket(ns_socket);
+        return;  // Silently fail during cleanup
+    }
+    
+    // Send unregister message
+    Message unreg_msg;
+    INIT_MESSAGE(unreg_msg);
+    unreg_msg.operation = OP_UNREGISTER_CLIENT;
+    strncpy(unreg_msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(unreg_msg.ip_address, local_ip, MAX_IP_LEN - 1);
+    
+    send_message(ns_socket, &unreg_msg);
+    close_socket(ns_socket);
+    
+    log_info("Unregistered from Name Server");
+}
+
+void signal_handler(int signum) {
+    if (signum == SIGINT) {
+        should_exit = 1;
+        printf("\n\nReceived Ctrl+C. Disconnecting gracefully...\n");
+        unregister_from_nameserver();
+        close_logger();
+        exit(0);
+    }
 }
 
 /* ============================================================================
@@ -457,6 +497,11 @@ void cmd_view(const char* flags) {
             msg.view_flags = VIEW_FLAG_LONG;
         } else if (strcmp(flags, "-al") == 0 || strcmp(flags, "-la") == 0) {
             msg.view_flags = VIEW_FLAG_ALL_LONG;
+        } else {
+            // Invalid flag provided
+            printf("Error: Invalid flag '%s'. Valid flags: -a, -l, -al, -la\n", flags);
+            close_socket(ns_socket);
+            return;
         }
     }
     
@@ -1162,6 +1207,9 @@ void cmd_help() {
 int main() {
     // Initialize logger
     init_logger("CLIENT", "logs/client.log");
+    
+    // Setup signal handler for graceful shutdown
+    signal(SIGINT, signal_handler);
     
     // Display banner
     printf("\n");

@@ -22,7 +22,23 @@
 #define MAX_CONNECTIONS 50
 #define MAX_FILES 1000
 #define HASH_TABLE_SIZE 1009  // Prime number for better distribution
-#define ACL_DATA_FILE "acl_data.db"  // Persistent ACL storage
+#define ACL_DATA_FILE "acl_data.db"  // Persistent ACL storage (in current working directory)
+
+/* ============================================================================
+ * INPUT VALIDATION
+ * ============================================================================ */
+
+// Check if string contains invalid characters for ACL persistence
+int contains_invalid_chars(const char* str) {
+    if (str == NULL) return 1;
+    while (*str) {
+        if (*str == '|' || *str == ',') {
+            return 1;  // Contains delimiter characters
+        }
+        str++;
+    }
+    return 0;
+}
 
 /* ============================================================================
  * EXTENDED STORAGE SERVER INFO (add files list)
@@ -368,12 +384,23 @@ int find_ss_for_file(const char* filename) {
 }
 
 int find_available_ss() {
+    static int last_used = -1;  // Track last used SS for round-robin
+    
+    if (ss_count == 0) return -1;
+    
+    // Round-robin: Try starting from next SS after last used
+    int start_idx = (last_used + 1) % ss_count;
+    
     for (int i = 0; i < ss_count; i++) {
-        if (storage_servers[i].base.is_alive) {
-            return i;
+        int idx = (start_idx + i) % ss_count;
+        if (storage_servers[idx].base.is_alive) {
+            last_used = idx;  // Remember this for next time
+            log_info("Selected SS[%d] for new file (round-robin)", idx);
+            return idx;
         }
     }
-    return -1;
+    
+    return -1;  // No alive storage servers
 }
 
 void add_file_to_ss(int ss_index, const char* filename) {
@@ -395,6 +422,21 @@ void add_file_to_ss(int ss_index, const char* filename) {
 
 int file_exists(const char* filename) {
     return find_ss_for_file(filename) >= 0;
+}
+
+// Helper to mark a client as disconnected by IP and port
+void mark_client_disconnected(const char* client_ip, int client_port) {
+    for (int i = 0; i < client_count; i++) {
+        if (clients[i].is_active && 
+            strcmp(clients[i].ip, client_ip) == 0 && 
+            clients[i].port == client_port) {
+            clients[i].is_active = 0;
+            time_t session_duration = time(NULL) - clients[i].connected_time;
+            log_info("Client '%s' disconnected from %s:%d (session duration: %ld seconds)", 
+                     clients[i].username, client_ip, client_port, session_duration);
+            return;
+        }
+    }
 }
 
 /* ============================================================================
@@ -473,6 +515,19 @@ void handle_ss_registration(int ss_socket, Message* msg) {
 }
 
 void handle_client_registration(int client_socket, Message* msg) {
+    // Validate username for special characters
+    if (contains_invalid_chars(msg->sender_id)) {
+        log_warning("Invalid username '%s' - contains | or ,", msg->sender_id);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_BAD_REQUEST;
+        snprintf(response.content, sizeof(response.content), 
+                 "Invalid username: cannot contain | or , characters");
+        send_message(client_socket, &response);
+        return;
+    }
+    
     if (client_count >= MAX_CONCURRENT_CLIENTS) {
         log_error("Maximum clients reached, rejecting registration");
         Message response;
@@ -517,6 +572,19 @@ void handle_client_registration(int client_socket, Message* msg) {
 
 void handle_create_request(int client_socket, Message* msg) {
     log_info("CREATE request from %s for file '%s'", msg->sender_id, msg->filename);
+    
+    // Validate filename for special characters
+    if (contains_invalid_chars(msg->filename)) {
+        log_warning("Invalid filename '%s' - contains | or ,", msg->filename);
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_BAD_REQUEST;
+        snprintf(response.content, sizeof(response.content), 
+                 "Invalid filename: cannot contain | or , characters");
+        send_message(client_socket, &response);
+        return;
+    }
     
     if (file_exists(msg->filename)) {
         log_warning("File '%s' already exists", msg->filename);
@@ -1042,6 +1110,16 @@ void handle_addaccess_request(int client_socket, Message* msg) {
     INIT_MESSAGE(response);
     response.operation = OP_ACK;
     
+    // Validate username for special characters
+    if (contains_invalid_chars(msg->target_user)) {
+        log_warning("Invalid username '%s' - contains | or ,", msg->target_user);
+        response.error_code = ERR_BAD_REQUEST;
+        snprintf(response.content, sizeof(response.content), 
+                 "Invalid username: cannot contain | or , characters");
+        send_message(client_socket, &response);
+        return;
+    }
+    
     // Check if requester is the owner
     if (!acl_check_owner(&acl_table, msg->filename, msg->sender_id)) {
         log_warning("Access denied: %s is not owner of '%s'", msg->sender_id, msg->filename);
@@ -1128,6 +1206,16 @@ void handle_remaccess_request(int client_socket, Message* msg) {
  * METADATA COMMAND HANDLERS
  * ============================================================================ */
 
+// Helper function for handle_list_request to check duplicates
+static int is_user_duplicate(const char* username, char users[][MAX_USERNAME_LEN], int count) {
+    for (int i = 0; i < count; i++) {
+        if (strcmp(users[i], username) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void handle_list_request(int client_socket, Message* msg) {
     log_info("LIST request from %s", msg->sender_id);
     
@@ -1136,25 +1224,48 @@ void handle_list_request(int client_socket, Message* msg) {
     response.operation = OP_ACK;
     response.error_code = ERR_SUCCESS;
     
-    // Build list of all registered users
+    // Get all users from ACL (persistent users who have created/accessed files)
+    char acl_users[MAX_CONCURRENT_CLIENTS][MAX_USERNAME_LEN];
+    int acl_user_count = acl_get_all_users(&acl_table, acl_users, MAX_CONCURRENT_CLIENTS);
+    
+    // Also include currently connected clients
+    // Create a combined unique list
+    char all_users[MAX_CONCURRENT_CLIENTS * 2][MAX_USERNAME_LEN];
+    int total_users = 0;
+    
+    // Add ACL users
+    for (int i = 0; i < acl_user_count; i++) {
+        strncpy(all_users[total_users], acl_users[i], MAX_USERNAME_LEN - 1);
+        all_users[total_users][MAX_USERNAME_LEN - 1] = '\0';
+        total_users++;
+    }
+    
+    // Add currently connected clients (if not already in list)
+    for (int i = 0; i < client_count && total_users < MAX_CONCURRENT_CLIENTS * 2; i++) {
+        if (clients[i].is_active && !is_user_duplicate(clients[i].username, all_users, total_users)) {
+            strncpy(all_users[total_users], clients[i].username, MAX_USERNAME_LEN - 1);
+            all_users[total_users][MAX_USERNAME_LEN - 1] = '\0';
+            total_users++;
+        }
+    }
+    
+    // Build list
     char user_list[MAX_CONTENT_LEN] = "";
     int offset = 0;
     
     offset += snprintf(user_list + offset, sizeof(user_list) - offset,
-                      "Registered users (%d):\n", client_count);
+                      "Users in system (%d):\n", total_users);
     
-    for (int i = 0; i < client_count && offset < MAX_CONTENT_LEN - 100; i++) {
-        if (clients[i].is_active) {
-            offset += snprintf(user_list + offset, sizeof(user_list) - offset,
-                             "  - %s\n", clients[i].username);
-        }
+    for (int i = 0; i < total_users && offset < MAX_CONTENT_LEN - 100; i++) {
+        offset += snprintf(user_list + offset, sizeof(user_list) - offset,
+                         "  - %s\n", all_users[i]);
     }
     
     strncpy(response.content, user_list, sizeof(response.content) - 1);
     response.content[sizeof(response.content) - 1] = '\0';
     
     send_message(client_socket, &response);
-    log_info("LIST: Sent %d users to %s", client_count, msg->sender_id);
+    log_info("LIST: Sent %d users to %s", total_users, msg->sender_id);
 }
 
 void handle_view_request(int client_socket, Message* msg) {
@@ -1389,7 +1500,14 @@ void handle_connection(int conn_socket, char* client_ip, int client_port) {
     int bytes = receive_message(conn_socket, &msg);
     
     if (bytes <= 0) {
-        log_error("Failed to receive initial message from %s:%d", client_ip, client_port);
+        if (bytes == 0) {
+            // Clean disconnection (client closed connection)
+            log_info("Connection closed by %s:%d (socket %d)", client_ip, client_port, conn_socket);
+            mark_client_disconnected(client_ip, client_port);
+        } else {
+            // Error receiving data
+            log_error("Failed to receive message from %s:%d (socket %d)", client_ip, client_port, conn_socket);
+        }
         close_socket(conn_socket);
         return;
     }
@@ -1404,6 +1522,13 @@ void handle_connection(int conn_socket, char* client_ip, int client_port) {
         case OP_REGISTER_CLIENT:
             log_info("Client registration request from %s", msg.sender_id);
             handle_client_registration(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_UNREGISTER_CLIENT:
+            log_info("Client unregister request from %s", msg.sender_id);
+            mark_client_disconnected(msg.ip_address, msg.nm_port);
+            // No response needed - client is disconnecting
             close_socket(conn_socket);
             break;
             

@@ -7,8 +7,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <pthread.h>
 #include "acl.h"
 #include "logger.h"
+
+/* ============================================================================
+ * MUTEX FOR THREAD-SAFE SAVE
+ * ============================================================================ */
+
+static pthread_mutex_t acl_save_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* ============================================================================
  * HASH FUNCTION
@@ -346,9 +354,12 @@ int acl_get_accessible_files(AclTable* acl, const char* username,
 }
 
 int acl_save(AclTable* acl, const char* filepath) {
+    pthread_mutex_lock(&acl_save_mutex);
+    
     FILE* fp = fopen(filepath, "w");
     if (fp == NULL) {
         log_error("ACL: Failed to open '%s' for writing", filepath);
+        pthread_mutex_unlock(&acl_save_mutex);
         return -1;
     }
     
@@ -385,8 +396,13 @@ int acl_save(AclTable* acl, const char* filepath) {
         }
     }
     
+    // Ensure data is written to disk
+    fflush(fp);
+    fsync(fileno(fp));
     fclose(fp);
+    
     log_info("ACL: Saved %d entries to '%s'", acl->file_count, filepath);
+    pthread_mutex_unlock(&acl_save_mutex);
     return 0;
 }
 
@@ -422,23 +438,27 @@ int acl_load(AclTable* acl, const char* filepath) {
         if (acl_add_file(acl, filename, owner) == 0) {
             loaded++;
             
-            // Parse and add read users
+            // Parse and add read users (using thread-safe strtok_r)
             if (parsed >= 3 && strlen(read_str) > 0) {
-                char* token = strtok(read_str, ",");
+                char* saveptr1;
+                char* token = strtok_r(read_str, ",", &saveptr1);
                 while (token != NULL) {
                     acl_add_access(acl, filename, token, ACCESS_READ);
-                    token = strtok(NULL, ",");
+                    token = strtok_r(NULL, ",", &saveptr1);
                 }
             }
             
-            // Parse and add write users
+            // Parse and add write users (using thread-safe strtok_r)
             if (parsed >= 4 && strlen(write_str) > 0) {
-                char* token = strtok(write_str, ",");
+                char* saveptr2;
+                char* token = strtok_r(write_str, ",", &saveptr2);
                 while (token != NULL) {
                     acl_add_access(acl, filename, token, ACCESS_WRITE);
-                    token = strtok(NULL, ",");
+                    token = strtok_r(NULL, ",", &saveptr2);
                 }
             }
+        } else {
+            log_error("ACL: Failed to load entry for '%s' (owner: %s)", filename, owner);
         }
     }
     
@@ -472,4 +492,55 @@ void acl_stats(AclTable* acl) {
     log_info("ACL Stats: %d files, %d/%d buckets (%.2f%%), max chain: %d, load: %.3f",
              acl->file_count, used_buckets, ACL_HASH_SIZE,
              (used_buckets * 100.0 / ACL_HASH_SIZE), max_chain, load_factor);
+}
+
+// Helper function for acl_get_all_users
+static int is_user_in_acl_list(const char* username, char users[][MAX_USERNAME_LEN], int count) {
+    for (int i = 0; i < count; i++) {
+        if (strcmp(users[i], username) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int acl_get_all_users(AclTable* acl, char users[][MAX_USERNAME_LEN], int max_users) {
+    int user_count = 0;
+    
+    // Iterate through all ACL entries
+    for (int i = 0; i < ACL_HASH_SIZE && user_count < max_users; i++) {
+        AclNode* current = acl->buckets[i];
+        while (current != NULL && user_count < max_users) {
+            AclEntry* entry = &current->entry;
+            
+            // Add owner if not already in list
+            if (!is_user_in_acl_list(entry->owner, users, user_count)) {
+                strncpy(users[user_count], entry->owner, MAX_USERNAME_LEN - 1);
+                users[user_count][MAX_USERNAME_LEN - 1] = '\0';
+                user_count++;
+            }
+            
+            // Add read users
+            for (int j = 0; j < entry->read_count && user_count < max_users; j++) {
+                if (!is_user_in_acl_list(entry->read_users[j], users, user_count)) {
+                    strncpy(users[user_count], entry->read_users[j], MAX_USERNAME_LEN - 1);
+                    users[user_count][MAX_USERNAME_LEN - 1] = '\0';
+                    user_count++;
+                }
+            }
+            
+            // Add write users
+            for (int j = 0; j < entry->write_count && user_count < max_users; j++) {
+                if (!is_user_in_acl_list(entry->write_users[j], users, user_count)) {
+                    strncpy(users[user_count], entry->write_users[j], MAX_USERNAME_LEN - 1);
+                    users[user_count][MAX_USERNAME_LEN - 1] = '\0';
+                    user_count++;
+                }
+            }
+            
+            current = current->next;
+        }
+    }
+    
+    return user_count;
 }

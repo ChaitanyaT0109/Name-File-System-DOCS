@@ -24,4 +24,8 @@ Thumbs.db
 
 # Test documentation (local only)
 Manual_test.md
-
+MISSING_FEATURES.md
+MULTI_MACHINE_SETUP.md
+MULTIPLE_SS_GUIDE.md
+QUICK_MULTI_MACHINE.md
+IMPLEMENTATION_ANALYSIS.md

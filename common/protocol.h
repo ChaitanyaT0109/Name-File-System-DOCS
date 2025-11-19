@@ -43,6 +43,7 @@
 // Registration Operations (50-59)
 #define OP_REGISTER_SS      50
 #define OP_REGISTER_CLIENT  51
+#define OP_UNREGISTER_CLIENT 52  // Client disconnection
 
 // Internal Operations (60-69)
 #define OP_ROUTE_INFO       60  // NS sends SS connection info to client

@@ -209,4 +209,15 @@ int acl_load(AclTable* acl, const char* filepath);
  */
 void acl_stats(AclTable* acl);
 
+/**
+ * Get all unique usernames from the ACL
+ * (includes all file owners and users with any access)
+ * 
+ * @param acl ACL table
+ * @param users Array to store usernames
+ * @param max_users Maximum number of users to return
+ * @return Number of unique users found
+ */
+int acl_get_all_users(AclTable* acl, char users[][MAX_USERNAME_LEN], int max_users);
+
 #endif /* ACL_H */

@@ -106,20 +106,28 @@ int send_message(int sockfd, Message* msg) {
         return -1;
     }
     
-    // Send the entire Message struct
-    ssize_t bytes_sent = send(sockfd, msg, sizeof(Message), 0);
+    // Send the entire Message struct in chunks if necessary
+    size_t total_sent = 0;
+    size_t msg_size = sizeof(Message);
+    const char* ptr = (const char*)msg;
     
-    if (bytes_sent < 0) {
-        perror("Send failed");
-        return -1;
+    while (total_sent < msg_size) {
+        ssize_t bytes_sent = send(sockfd, ptr + total_sent, msg_size - total_sent, 0);
+        
+        if (bytes_sent < 0) {
+            perror("Send failed");
+            return -1;
+        }
+        
+        if (bytes_sent == 0) {
+            fprintf(stderr, "Warning: Connection closed during send\n");
+            return total_sent;
+        }
+        
+        total_sent += bytes_sent;
     }
     
-    if (bytes_sent != sizeof(Message)) {
-        fprintf(stderr, "Warning: Partial message sent (%zd/%zu bytes)\n", 
-                bytes_sent, sizeof(Message));
-    }
-    
-    return bytes_sent;
+    return total_sent;
 }
 
 int receive_message(int sockfd, Message* msg) {
@@ -131,25 +139,34 @@ int receive_message(int sockfd, Message* msg) {
     // Clear the message buffer first
     memset(msg, 0, sizeof(Message));
     
-    // Receive the entire Message struct
-    ssize_t bytes_received = recv(sockfd, msg, sizeof(Message), 0);
+    // Receive the entire Message struct in chunks if necessary
+    size_t total_received = 0;
+    size_t msg_size = sizeof(Message);
+    char* ptr = (char*)msg;
     
-    if (bytes_received < 0) {
-        perror("Receive failed");
-        return -1;
+    while (total_received < msg_size) {
+        ssize_t bytes_received = recv(sockfd, ptr + total_received, msg_size - total_received, 0);
+        
+        if (bytes_received < 0) {
+            perror("Receive failed");
+            return -1;
+        }
+        
+        if (bytes_received == 0) {
+            // Connection closed by peer
+            if (total_received == 0) {
+                return 0;  // Clean close before any data
+            } else {
+                fprintf(stderr, "Warning: Partial message received (%zu/%zu bytes)\n", 
+                        total_received, msg_size);
+                return -1;  // Incomplete message
+            }
+        }
+        
+        total_received += bytes_received;
     }
     
-    if (bytes_received == 0) {
-        // Connection closed by peer
-        return 0;
-    }
-    
-    if (bytes_received != sizeof(Message)) {
-        fprintf(stderr, "Warning: Partial message received (%zd/%zu bytes)\n", 
-                bytes_received, sizeof(Message));
-    }
-    
-    return bytes_received;
+    return total_received;
 }
 
 int send_data(int sockfd, const void* data, size_t length) {
