@@ -1605,20 +1605,21 @@ void handle_viewfolder_request(int client_socket, Message* msg) {
     INIT_MESSAGE(response);
     response.operation = OP_ACK;
     
-    // Check permissions
-    if (!acl_can_access(&acl_table, msg->filename, msg->sender_id)) {
-        response.error_code = ERR_PERMISSION_DENIED;
-        snprintf(response.content, sizeof(response.content),
-                "Permission denied");
-        send_message(client_socket, &response);
-        return;
+    // For viewing folders, any registered user can view any folder
+    // Folders are public entities, no ACL check needed
+    
+    // Find any available storage server (folders are on first SS)
+    int ss_index = -1;
+    for (int i = 0; i < ss_count; i++) {
+        if (storage_servers[i].base.is_alive) {
+            ss_index = i;
+            break;
+        }
     }
     
-    // Find storage server
-    int ss_index = hashmap_find( msg->filename);
     if (ss_index < 0) {
-        response.error_code = ERR_NOT_FOUND;
-        snprintf(response.content, sizeof(response.content), "Path not found");
+        response.error_code = ERR_SS_UNAVAILABLE;
+        snprintf(response.content, sizeof(response.content), "No storage servers available");
         send_message(client_socket, &response);
         return;
     }
