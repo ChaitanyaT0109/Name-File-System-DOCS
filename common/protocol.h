@@ -78,6 +78,7 @@
 // Bonus: Replication Operations (110-119)
 #define OP_REPLICATE        110 // Replicate file to backup SS
 #define OP_HEARTBEAT        111 // SS heartbeat
+#define OP_SEARCH           112 // Content search
 
 /* ============================================================================
  * ERROR CODES - Standard HTTP-like error codes
@@ -354,6 +355,8 @@ static const char* get_operation_name(int operation) {
         
         case OP_REPLICATE:          return "REPLICATE";
         case OP_HEARTBEAT:          return "HEARTBEAT";
+        
+        case OP_SEARCH:             return "SEARCH";
         
         default:                    return "UNKNOWN";
     }

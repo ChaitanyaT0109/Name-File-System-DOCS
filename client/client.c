@@ -1761,6 +1761,54 @@ void cmd_denyrequest(const char* filename, const char* username) {
     }
 }
 
+/* ============================================================================
+ * SEARCH COMMAND - Content search
+ * ============================================================================ */
+
+void cmd_search(const char* word) {
+    if (strlen(word) == 0) {
+        printf("Error: Search word cannot be empty\n");
+        printf("Usage: SEARCH <word>\n");
+        return;
+    }
+    
+    log_info("SEARCH: word='%s'", word);
+    
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_SEARCH;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.content, word, MAX_CONTENT_LEN - 1);
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code == ERR_SUCCESS || response.error_code == ERR_NOT_FOUND) {
+        printf("%s\n", response.content);
+        if (response.error_code == ERR_SUCCESS) {
+            log_info("SEARCH successful");
+        }
+    } else {
+        printf("Error: %s\n", response.content);
+        log_error("SEARCH failed: %s", get_error_message(response.error_code));
+    }
+}
+
 void cmd_help() {
     printf("\n");
     printf("Available Commands:\n");
@@ -1806,6 +1854,9 @@ void cmd_help() {
     printf("    APPROVEREQUEST <file> <user>     - Approve access request\n");
     printf("    DENYREQUEST <file> <user>        - Deny access request\n");
     printf("\n");
+    printf("  BONUS - Content Search:\n");
+    printf("    SEARCH <word>                    - Search for files containing word\n");
+    printf("\n");
     printf("  General:\n");
     printf("    HELP                             - Show this help message\n");
     printf("    EXIT                             - Exit the client\n");
@@ -1826,6 +1877,7 @@ void cmd_help() {
     printf("  MOVE mydoc.txt reports\n");
     printf("  CHECKPOINT mydoc.txt v1\n");
     printf("  REQUESTACCESS mydoc.txt\n");
+    printf("  SEARCH hello\n");
     printf("\n");
 }
 
@@ -1952,6 +2004,8 @@ int main() {
             cmd_approverequest(arg1, arg2);
         } else if (strcmp(command, "DENYREQUEST") == 0) {
             cmd_denyrequest(arg1, arg2);
+        } else if (strcmp(command, "SEARCH") == 0) {
+            cmd_search(arg1);
         } else if (strcmp(command, "HELP") == 0) {
             cmd_help();
         } else if (strcmp(command, "EXIT") == 0 || strcmp(command, "QUIT") == 0) {

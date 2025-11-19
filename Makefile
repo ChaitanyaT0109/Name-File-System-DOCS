@@ -90,7 +90,7 @@ nameserver: $(NAMESERVER)
 
 $(NAMESERVER): $(NS_DIR)/nameserver.c $(NS_DIR)/acl.o $(NS_DIR)/access_requests.o $(COMMON_OBJS)
 	@echo "Building nameserver..."
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lpthread
 
 # ACL module for nameserver
 $(NS_DIR)/acl.o: $(NS_DIR)/acl.c $(NS_DIR)/acl.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
@@ -104,7 +104,7 @@ $(NS_DIR)/access_requests.o: $(NS_DIR)/access_requests.c $(NS_DIR)/access_reques
 
 storageserver: $(STORAGESERVER)
 
-$(STORAGESERVER): $(SS_DIR)/storage_server.c $(SS_DIR)/sentence_lock.o $(SS_DIR)/sentence_parser.o $(SS_DIR)/undo_buffer.o $(SS_DIR)/folder_manager.o $(SS_DIR)/checkpoint_manager.o $(COMMON_OBJS)
+$(STORAGESERVER): $(SS_DIR)/storage_server.c $(SS_DIR)/sentence_lock.o $(SS_DIR)/sentence_parser.o $(SS_DIR)/undo_buffer.o $(SS_DIR)/folder_manager.o $(SS_DIR)/checkpoint_manager.o $(SS_DIR)/inverted_index.o $(COMMON_OBJS)
 	@echo "Building storage_server..."
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lpthread
 
@@ -132,6 +132,11 @@ $(SS_DIR)/folder_manager.o: $(SS_DIR)/folder_manager.c $(SS_DIR)/folder_manager.
 $(SS_DIR)/checkpoint_manager.o: $(SS_DIR)/checkpoint_manager.c $(SS_DIR)/checkpoint_manager.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
 	@echo "Building checkpoint_manager module..."
 	$(CC) $(CFLAGS) -c $(SS_DIR)/checkpoint_manager.c -o $@
+
+# Inverted index module for storage server (BONUS - Content Search)
+$(SS_DIR)/inverted_index.o: $(SS_DIR)/inverted_index.c $(SS_DIR)/inverted_index.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
+	@echo "Building inverted_index module..."
+	$(CC) $(CFLAGS) -c $(SS_DIR)/inverted_index.c -o $@
 
 client: $(CLIENT)
 

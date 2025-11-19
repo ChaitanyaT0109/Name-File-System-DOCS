@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <sys/select.h>
 #include <sys/socket.h> // Required for setsockopt
 #include <errno.h>
@@ -1812,6 +1813,134 @@ void handle_denyrequest_request(int client_socket, Message* msg) {
 }
 
 /* ============================================================================
+ * SEARCH HANDLER - Forward search request to all storage servers
+ * ============================================================================ */
+
+void handle_search_request(int client_socket, Message* msg) {
+    log_info("SEARCH request from %s for word '%s'", msg->sender_id, msg->content);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    // Collect results from all alive storage servers
+    char all_results[MAX_CONTENT_LEN * 2] = "";
+    int total_files = 0;
+    int ss_queried = 0;
+    
+    for (int i = 0; i < ss_count; i++) {
+        if (!storage_servers[i].base.is_alive) {
+            log_debug("Skipping dead SS %s:%d", 
+                     storage_servers[i].base.ip, 
+                     storage_servers[i].base.nm_port);
+            continue;
+        }
+        
+        // Forward search request to this SS
+        Message search_msg;
+        INIT_MESSAGE(search_msg);
+        search_msg.operation = OP_SEARCH;
+        strncpy(search_msg.sender_id, msg->sender_id, MAX_USERNAME_LEN - 1);
+        strncpy(search_msg.content, msg->content, MAX_CONTENT_LEN - 1);
+        
+        int ss_socket = create_socket();
+        if (ss_socket < 0) {
+            log_warning("Failed to create socket for SS %d", i);
+            continue;
+        }
+        
+        if (connect_to_server(ss_socket, storage_servers[i].base.ip, 
+                             storage_servers[i].base.client_port) < 0) {
+            log_warning("Failed to connect to SS %s:%d", 
+                       storage_servers[i].base.ip, 
+                       storage_servers[i].base.client_port);
+            close_socket(ss_socket);
+            continue;
+        }
+        
+        if (send_message(ss_socket, &search_msg) < 0) {
+            log_warning("Failed to send search to SS %d", i);
+            close_socket(ss_socket);
+            continue;
+        }
+        
+        // Receive search results
+        Message ss_response;
+        if (receive_message(ss_socket, &ss_response) > 0) {
+            if (ss_response.error_code == ERR_SUCCESS) {
+                // Append results
+                if (strlen(all_results) > 0) {
+                    strcat(all_results, "\n");
+                }
+                strcat(all_results, ss_response.content + strlen("Files containing '") );
+                // Skip the header line
+                char* newline = strchr(ss_response.content, '\n');
+                if (newline) {
+                    strcat(all_results, newline);
+                    total_files++;
+                }
+            }
+        }
+        
+        close_socket(ss_socket);
+        ss_queried++;
+    }
+    
+    if (ss_queried == 0) {
+        response.error_code = ERR_SS_UNAVAILABLE;
+        strcpy(response.content, "No storage servers available");
+    } else if (total_files == 0) {
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content),
+                "No files found containing '%s'", msg->content);
+    } else {
+        response.error_code = ERR_SUCCESS;
+        snprintf(response.content, sizeof(response.content),
+                "Files containing '%s':\n%s", msg->content, all_results);
+    }
+    
+    send_message(client_socket, &response);
+    log_info("SEARCH response sent: %d files found across %d servers", 
+             total_files, ss_queried);
+}
+
+/* ============================================================================
+ * HEARTBEAT HANDLER - Update SS heartbeat timestamp for fault tolerance
+ * ============================================================================ */
+
+void handle_heartbeat(int client_socket, Message* msg) {
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    // Find the storage server by IP and port
+    int ss_index = -1;
+    for (int i = 0; i < ss_count; i++) {
+        if (strcmp(storage_servers[i].base.ip, msg->ip_address) == 0 &&
+            storage_servers[i].base.nm_port == msg->nm_port) {
+            ss_index = i;
+            break;
+        }
+    }
+    
+    if (ss_index == -1) {
+        log_warning("Heartbeat from unregistered SS: %s:%d", msg->ip_address, msg->nm_port);
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content), 
+                "Storage server not registered");
+    } else {
+        // Update heartbeat timestamp
+        storage_servers[ss_index].base.last_heartbeat = time(NULL);
+        storage_servers[ss_index].base.is_alive = 1;
+        
+        response.error_code = ERR_SUCCESS;
+        log_debug("Heartbeat received from SS %s:%d", msg->ip_address, msg->nm_port);
+    }
+    
+    send_message(client_socket, &response);
+}
+
+/* ============================================================================
  * REQUEST HANDLER - Process client/SS requests
  * ============================================================================ */
 
@@ -1949,6 +2078,16 @@ void handle_connection(int conn_socket, char* client_ip, int client_port) {
             close_socket(conn_socket);
             break;
             
+        case OP_HEARTBEAT:
+            handle_heartbeat(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_SEARCH:
+            handle_search_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
         default:
             log_warning("Unknown operation: %d from %s:%d", msg.operation, client_ip, client_port);
             Message response;
@@ -1963,6 +2102,43 @@ void handle_connection(int conn_socket, char* client_ip, int client_port) {
 }
 
 /* ============================================================================
+ * FAILURE DETECTION THREAD - Monitor SS heartbeats and detect failures
+ * ============================================================================ */
+
+#define HEARTBEAT_TIMEOUT 15  // Mark SS as dead after 15 seconds without heartbeat
+
+void* failure_detection_thread(void* arg) {
+    (void)arg;
+    log_info("Failure detection thread started - checking every 10 seconds");
+    
+    while (1) {
+        sleep(10);  // Check every 10 seconds
+        
+        time_t current_time = time(NULL);
+        
+        for (int i = 0; i < ss_count; i++) {
+            if (storage_servers[i].base.is_alive) {
+                time_t time_since_heartbeat = current_time - storage_servers[i].base.last_heartbeat;
+                
+                if (time_since_heartbeat > HEARTBEAT_TIMEOUT) {
+                    log_warning("Storage Server %s:%d marked as DEAD (no heartbeat for %ld seconds)",
+                              storage_servers[i].base.ip, 
+                              storage_servers[i].base.nm_port,
+                              time_since_heartbeat);
+                    
+                    storage_servers[i].base.is_alive = 0;
+                    
+                    // TODO: Trigger failover to backup SS if replication is enabled
+                    // For now, just mark as unavailable
+                }
+            }
+        }
+    }
+    
+    return NULL;
+}
+
+/* ============================================================================
  * MAIN SERVER LOOP - Using select() for concurrent connections
  * ============================================================================ */
 
@@ -1972,6 +2148,7 @@ int main() {
     fd_set read_fds, active_fds;
     int max_fd;
     struct timeval timeout;
+    pthread_t fd_thread;
     
     init_logger("NS", "logs/nameserver.log");
     
@@ -1981,6 +2158,13 @@ int main() {
     
     init_registries();
     log_info("Registries initialized with HashMap (O(1) lookup)");
+    
+    // Start failure detection thread
+    if (pthread_create(&fd_thread, NULL, failure_detection_thread, NULL) != 0) {
+        log_warning("Failed to create failure detection thread (non-critical)");
+    } else {
+        log_info("Failure detection thread started - monitoring SS heartbeats");
+    }
     
     // Create server socket
     server_socket = create_socket();

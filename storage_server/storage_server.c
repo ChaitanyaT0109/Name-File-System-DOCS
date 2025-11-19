@@ -24,6 +24,7 @@
 #include "undo_buffer.h"
 #include "folder_manager.h"
 #include "checkpoint_manager.h"
+#include "inverted_index.h"
 
 // Configurable via command-line arguments
 static char NS_IP[MAX_IP_LEN] = "192.168.1.187";  // Name Server IP
@@ -41,6 +42,9 @@ char local_ip[MAX_IP_LEN];
 // WRITE operation state
 LockTable lock_table;
 UndoTable undo_table;  // Changed from UndoBuffer to UndoTable
+
+// Content search index
+InvertedIndex search_index;
 
 /* ============================================================================
  * FILE OPERATIONS (Original code retained)
@@ -573,6 +577,13 @@ void handle_write_session(int client_socket, Message* msg) {
         // Release lock
         lock_release(&lock_table, write_session.filename, write_session.sentence_num, write_session.client_id);
         
+        // Update inverted index with new content
+        char updated_content[MAX_CONTENT_LEN];
+        if (read_file(write_session.filename, updated_content, sizeof(updated_content)) == ERR_SUCCESS) {
+            index_file(&search_index, write_session.filename, updated_content);
+            log_debug("Inverted index updated for file '%s'", write_session.filename);
+        }
+        
         // Clean up session
         free_words(write_session.words, write_session.word_count);
         write_session.active = 0;
@@ -925,6 +936,33 @@ void handle_listcheckpoints_request(int socket, Message* msg) {
     log_info("LISTCHECKPOINTS response sent: %d checkpoints", count);
 }
 
+/* ============================================================================
+ * SEARCH HANDLER - Content search using inverted index
+ * ============================================================================ */
+
+void handle_search_request(int socket, Message* msg) {
+    log_info("SEARCH request for word '%s'", msg->content);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    char result[MAX_CONTENT_LEN];
+    int count = index_search(&search_index, msg->content, result);
+    
+    if (count > 0) {
+        response.error_code = ERR_SUCCESS;
+        snprintf(response.content, sizeof(response.content), 
+                "Files containing '%s':\n%s", msg->content, result);
+    } else {
+        response.error_code = ERR_NOT_FOUND;
+        strcpy(response.content, result);  // "No files found containing this word"
+    }
+    
+    send_message(socket, &response);
+    log_info("SEARCH response sent: %d files found", count);
+}
+
 
 /* ============================================================================
  * SERVER THREADS (Modified)
@@ -963,8 +1001,18 @@ void* ns_inbound_thread(void* arg) {
         int result;
         if (msg.operation == OP_CREATE) {
             result = create_file(msg.filename, msg.sender_id);
+            // Index the new empty file
+            if (result == ERR_CREATED) {
+                index_file(&search_index, msg.filename, "");
+                log_debug("Indexed new file '%s' (empty)", msg.filename);
+            }
         } else if (msg.operation == OP_DELETE) {
             result = delete_file(msg.filename);
+            // Remove from index
+            if (result == ERR_SUCCESS) {
+                index_remove_file(&search_index, msg.filename);
+                log_debug("Removed file '%s' from index", msg.filename);
+            }
         } else if (msg.operation == OP_GET_METADATA) {
             // Handle metadata request
             char metadata[MAX_CONTENT_LEN];
@@ -989,15 +1037,15 @@ void* ns_inbound_thread(void* arg) {
             close_socket(ns_conn_socket);
             continue;
         } else if (msg.operation == OP_CREATEFOLDER) {
-            handle_createfolder_request(&msg, ns_conn_socket);
+            handle_createfolder_request(ns_conn_socket, &msg);
             close_socket(ns_conn_socket);
             continue;
         } else if (msg.operation == OP_MOVE) {
-            handle_move_request(&msg, ns_conn_socket);
+            handle_move_request(ns_conn_socket, &msg);
             close_socket(ns_conn_socket);
             continue;
         } else if (msg.operation == OP_VIEWFOLDER) {
-            handle_viewfolder_request(&msg, ns_conn_socket);
+            handle_viewfolder_request(ns_conn_socket, &msg);
             close_socket(ns_conn_socket);
             continue;
         } else {
@@ -1120,19 +1168,23 @@ void* client_server_thread(void* arg) {
                     break;
                     
                 case OP_CHECKPOINT:
-                    handle_checkpoint_request(&msg, client_socket);
+                    handle_checkpoint_request(client_socket, &msg);
                     break;
                     
                 case OP_VIEWCHECKPOINT:
-                    handle_viewcheckpoint_request(&msg, client_socket);
+                    handle_viewcheckpoint_request(client_socket, &msg);
                     break;
                     
                 case OP_REVERT:
-                    handle_revert_request(&msg, client_socket);
+                    handle_revert_request(client_socket, &msg);
                     break;
                     
                 case OP_LISTCHECKPOINTS:
-                    handle_listcheckpoints_request(&msg, client_socket);
+                    handle_listcheckpoints_request(client_socket, &msg);
+                    break;
+                    
+                case OP_SEARCH:
+                    handle_search_request(client_socket, &msg);
                     break;
                     
                 default:
@@ -1169,11 +1221,63 @@ void* lock_cleanup_thread(void* arg) {
 
 
 /* ============================================================================
+ * HEARTBEAT THREAD - Periodic heartbeat to NS for fault tolerance
+ * ============================================================================ */
+
+void* heartbeat_thread(void* arg) {
+    (void)arg;
+    log_info("Heartbeat thread started - sending heartbeat every 5 seconds");
+    
+    while (1) {
+        sleep(5);  // Send heartbeat every 5 seconds
+        
+        // Create heartbeat message
+        Message msg;
+        INIT_MESSAGE(msg);
+        msg.operation = OP_HEARTBEAT;
+        strncpy(msg.ip_address, local_ip, MAX_IP_LEN - 1);
+        msg.nm_port = SS_NM_PORT;
+        msg.client_port = SS_CLIENT_PORT;
+        
+        // Send heartbeat to NS
+        int hb_socket = create_socket();
+        if (hb_socket < 0) {
+            log_warning("Heartbeat: Failed to create socket");
+            continue;
+        }
+        
+        if (connect_to_server(hb_socket, NS_IP, NS_PORT) < 0) {
+            log_warning("Heartbeat: Failed to connect to NS");
+            close_socket(hb_socket);
+            continue;
+        }
+        
+        if (send_message(hb_socket, &msg) < 0) {
+            log_warning("Heartbeat: Failed to send message");
+            close_socket(hb_socket);
+            continue;
+        }
+        
+        // Receive acknowledgment
+        Message response;
+        if (receive_message(hb_socket, &response) > 0) {
+            if (response.error_code == ERR_SUCCESS) {
+                log_debug("Heartbeat acknowledged by NS");
+            }
+        }
+        
+        close_socket(hb_socket);
+    }
+    
+    return NULL;
+}
+
+/* ============================================================================
  * MAIN (Modified for Correct Order and SO_REUSEADDR)
  * ============================================================================ */
 
 int main(int argc, char* argv[]) {
-    pthread_t ns_thread, client_thread, cleanup_thread;
+    pthread_t ns_thread, client_thread, cleanup_thread, hb_thread;
     int opt = 1; // Used for SO_REUSEADDR option
     
     // Parse command-line arguments
@@ -1227,6 +1331,9 @@ int main(int argc, char* argv[]) {
     lock_table_init(&lock_table);
     undo_table_init(&undo_table);  // Changed from undo_buffer_init
     
+    // Initialize inverted index for content search
+    index_init(&search_index);
+    
     get_local_ip(local_ip);
     log_info("Local IP: %s", local_ip);
     
@@ -1240,6 +1347,15 @@ int main(int argc, char* argv[]) {
     char existing_files[100][MAX_FILENAME_LEN];
     int file_count = scan_storage_files(existing_files, 100);
     log_info("Found %d existing files in storage", file_count);
+    
+    // Index all existing files for content search
+    for (int i = 0; i < file_count; i++) {
+        char content[MAX_CONTENT_LEN];
+        if (read_file(existing_files[i], content, sizeof(content)) == ERR_SUCCESS) {
+            index_file(&search_index, existing_files[i], content);
+        }
+    }
+    log_info("Indexed %d existing files for content search", file_count);
     
     // --------------------------------------------------------------------------
     // STEP 1: Setup NS Inbound Listener (SS_NM_PORT: 8081)
@@ -1326,6 +1442,13 @@ int main(int argc, char* argv[]) {
         log_warning("Failed to create lock cleanup thread (non-critical)");
     } else {
         log_info("Lock cleanup thread created");
+    }
+    
+    // Start heartbeat thread for fault tolerance
+    if (pthread_create(&hb_thread, NULL, heartbeat_thread, NULL) != 0) {
+        log_warning("Failed to create heartbeat thread (non-critical)");
+    } else {
+        log_info("Heartbeat thread created - sending heartbeat every 5 seconds");
     }
     
     log_info("============================================================");
