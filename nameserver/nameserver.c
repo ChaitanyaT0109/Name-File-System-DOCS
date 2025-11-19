@@ -1507,21 +1507,23 @@ void handle_createfolder_request(int client_socket, Message* msg) {
     INIT_MESSAGE(response);
     response.operation = OP_ACK;
     
-    // Check permissions (owner only)
-    if (!acl_can_access(&acl_table, msg->filename, msg->sender_id)) {
-        log_warning("CREATEFOLDER denied: %s has no access to '%s'", msg->sender_id, msg->filename);
-        response.error_code = ERR_PERMISSION_DENIED;
-        snprintf(response.content, sizeof(response.content),
-                "Permission denied: You don't have access to this path");
-        send_message(client_socket, &response);
-        return;
+    // For folder creation, any registered user can create folders
+    // No ACL check needed since folders are a new entity
+    // Just need to pick an available storage server
+    
+    // Find any available storage server (use first one)
+    int ss_index = -1;
+    for (int i = 0; i < ss_count; i++) {
+        if (storage_servers[i].base.is_alive) {
+            ss_index = i;
+            break;
+        }
     }
     
-    // Find storage server
-    int ss_index = hashmap_find( msg->filename);
     if (ss_index < 0) {
-        response.error_code = ERR_NOT_FOUND;
-        snprintf(response.content, sizeof(response.content), "Base path not found");
+        log_error("No active storage servers available for CREATEFOLDER");
+        response.error_code = ERR_SS_UNAVAILABLE;
+        strcpy(response.content, "No storage servers available");
         send_message(client_socket, &response);
         return;
     }

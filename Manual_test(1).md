@@ -3603,6 +3603,7 @@ CREATE testscript.sh
 # Then execute:
 EXEC testscript.sh
 
+
 # Expected Output:
 # ─────────────────────────────────────────────────────────────
 # Execution Output: testscript.sh

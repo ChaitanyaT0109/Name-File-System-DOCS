@@ -373,15 +373,16 @@ void handle_write_session(int client_socket, Message* msg) {
         char** sentences;
         int sentence_count = parse_sentences(file_content, &sentences);
         
-        // Special case: Allow WRITE 0 on empty file (sentence_count == 0)
-        if (msg->sentence_num < 0 || (sentence_count > 0 && msg->sentence_num >= sentence_count) || 
-            (sentence_count == 0 && msg->sentence_num > 0)) {
+        // Allow WRITE to append new sentence: valid indices are 0 to sentence_count (inclusive)
+        // - WRITE 0 on empty file (sentence_count == 0): OK, creates first sentence
+        // - WRITE 1 on file with 1 sentence (sentence_count == 1): OK, appends second sentence
+        if (msg->sentence_num < 0 || msg->sentence_num > sentence_count) {
             free_sentences(sentences, sentence_count);
             lock_release(&lock_table, msg->filename, msg->sentence_num, msg->sender_id);
             response.error_code = ERR_INDEX_ERROR;
             snprintf(response.content, sizeof(response.content),
-                    "Invalid sentence number %d (file has %d sentences)", 
-                    msg->sentence_num, sentence_count);
+                    "Invalid sentence number %d (file has %d sentences, valid range: 0-%d)", 
+                    msg->sentence_num, sentence_count, sentence_count);
             send_message(client_socket, &response);
             return;
         }
@@ -390,7 +391,12 @@ void handle_write_session(int client_socket, Message* msg) {
         char** words;
         int word_count;
         
-        if (sentence_count == 0 && msg->sentence_num == 0) {
+        if (msg->sentence_num == sentence_count) {
+            // Appending new sentence - start with empty word list
+            words = NULL;
+            word_count = 0;
+            log_info("Appending new sentence at index %d", msg->sentence_num);
+        } else if (sentence_count == 0 && msg->sentence_num == 0) {
             // Empty file - initialize with empty word list
             words = NULL;
             word_count = 0;
@@ -517,18 +523,24 @@ void handle_write_session(int client_socket, Message* msg) {
             
             log_info("Sentence split into %d parts due to delimiters", part_count);
             
-            // Replace old sentence with new parts
-            char** new_sentences = malloc((sentence_count - 1 + part_count) * sizeof(char*));
+            // Determine if appending or replacing
+            int is_appending = (write_session.sentence_num == sentence_count);
+            int new_total = is_appending ? (sentence_count + part_count) : (sentence_count - 1 + part_count);
+            
+            char** new_sentences = malloc(new_total * sizeof(char*));
             int new_idx = 0;
             
-            for (int i = 0; i < write_session.sentence_num; i++) {
+            // Copy sentences before the target
+            for (int i = 0; i < write_session.sentence_num && i < sentence_count; i++) {
                 new_sentences[new_idx++] = strdup(sentences[i]);
             }
             
+            // Add new parts
             for (int i = 0; i < part_count; i++) {
                 new_sentences[new_idx++] = strdup(parts[i]);
             }
             
+            // Copy sentences after the target (skip if appending or replacing)
             for (int i = write_session.sentence_num + 1; i < sentence_count; i++) {
                 new_sentences[new_idx++] = strdup(sentences[i]);
             }
@@ -539,9 +551,23 @@ void handle_write_session(int client_socket, Message* msg) {
             sentences = new_sentences;
             sentence_count = new_idx;
         } else {
-            // No split - simple replacement
-            free(sentences[write_session.sentence_num]);
-            sentences[write_session.sentence_num] = strdup(new_sentence);
+            // No split - simple replacement or append
+            if (write_session.sentence_num == sentence_count) {
+                // Appending: expand array
+                char** new_sentences = malloc((sentence_count + 1) * sizeof(char*));
+                for (int i = 0; i < sentence_count; i++) {
+                    new_sentences[i] = strdup(sentences[i]);
+                }
+                new_sentences[sentence_count] = strdup(new_sentence);
+                free_sentences(sentences, sentence_count);
+                sentences = new_sentences;
+                sentence_count++;
+                log_info("Appended new sentence, total now %d", sentence_count);
+            } else {
+                // Replacing existing sentence
+                free(sentences[write_session.sentence_num]);
+                sentences[write_session.sentence_num] = strdup(new_sentence);
+            }
         }
         
         // Rebuild file
@@ -1046,6 +1072,32 @@ void* ns_inbound_thread(void* arg) {
             continue;
         } else if (msg.operation == OP_VIEWFOLDER) {
             handle_viewfolder_request(ns_conn_socket, &msg);
+            close_socket(ns_conn_socket);
+            continue;
+        } else if (msg.operation == OP_READ) {
+            // Handle READ request from NS (for EXEC command)
+            char file_content[MAX_CONTENT_LEN];
+            result = read_file(msg.filename, file_content, sizeof(file_content));
+            
+            // Send response back to NS
+            Message response;
+            INIT_MESSAGE(response);
+            response.operation = OP_ACK;
+            response.error_code = result;
+            
+            if (result == ERR_SUCCESS) {
+                strncpy(response.content, file_content, sizeof(response.content) - 1);
+                response.content[sizeof(response.content) - 1] = '\0';
+                log_info("Sent file content to NS for EXEC: '%s' (%zu bytes)", 
+                         msg.filename, strlen(file_content));
+            } else {
+                snprintf(response.content, sizeof(response.content),
+                        "Failed to read file: %s", get_error_message(result));
+                log_error("Failed to read file '%s' for NS: %s", 
+                         msg.filename, get_error_message(result));
+            }
+            
+            send_message(ns_conn_socket, &response);
             close_socket(ns_conn_socket);
             continue;
         } else {

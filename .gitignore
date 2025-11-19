@@ -23,7 +23,7 @@ Thumbs.db
 *.temp
 
 # Test documentation (local only)
-Manual_test.md
+Manual_test(1).md
 MISSING_FEATURES.md
 MULTI_MACHINE_SETUP.md
 MULTIPLE_SS_GUIDE.md
