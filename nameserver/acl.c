@@ -544,3 +544,35 @@ int acl_get_all_users(AclTable* acl, char users[][MAX_USERNAME_LEN], int max_use
     
     return user_count;
 }
+
+/* ============================================================================
+ * HELPER FUNCTIONS
+ * ============================================================================ */
+
+int acl_can_access(AclTable* acl, const char* filename, const char* username) {
+    if (acl == NULL || filename == NULL || username == NULL) {
+        return 0;
+    }
+    
+    // Check if user has read or write access, or is owner
+    return (acl_check_read(acl, filename, username) || 
+            acl_check_write(acl, filename, username) ||
+            acl_check_owner(acl, filename, username));
+}
+
+int acl_is_owner(AclTable* acl, const char* filename, const char* username) {
+    if (acl == NULL || filename == NULL || username == NULL) {
+        return 0;
+    }
+    
+    return acl_check_owner(acl, filename, username);
+}
+
+int acl_add_user(AclTable* acl, const char* filename, const char* username) {
+    if (acl == NULL || filename == NULL || username == NULL) {
+        return -1;
+    }
+    
+    // Add user with read access
+    return acl_add_access(acl, filename, username, ACCESS_READ);
+}

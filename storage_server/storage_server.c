@@ -22,13 +22,15 @@
 #include "sentence_lock.h"
 #include "sentence_parser.h"
 #include "undo_buffer.h"
+#include "folder_manager.h"
+#include "checkpoint_manager.h"
 
 // Configurable via command-line arguments
 static char NS_IP[MAX_IP_LEN] = "192.168.1.187";  // Name Server IP
 static int NS_PORT = 8080;                         // Name Server port
 static int SS_NM_PORT = 8081;                      // Port for NS communication (inbound)
 static int SS_CLIENT_PORT = 8082;                  // Port for client communication (inbound)
-static char STORAGE_DIR[MAX_PATH_LEN] = "./storage";  // Storage directory
+char STORAGE_DIR[MAX_PATH_LEN] = "./storage";  // Storage directory (non-static for module access)
 
 // Global state
 int ns_socket = -1;             // Outbound socket to NS (for registration/heartbeat)
@@ -750,6 +752,179 @@ void handle_read_from_client(int client_socket, Message* msg) {
     log_info("Sent READ response to client: %s", get_error_message(result));
 }
 
+/* ============================================================================
+ * BONUS: FOLDER OPERATIONS HANDLERS
+ * ============================================================================ */
+
+void handle_createfolder_request(int socket, Message* msg) {
+    log_info("CREATEFOLDER request for folder '%s'", msg->folder_name);
+    
+    int result = folder_create(msg->folder_name, msg->sender_id);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    response.error_code = result;
+    
+    if (result == ERR_CREATED) {
+        snprintf(response.content, sizeof(response.content),
+                 "Folder '%s' created successfully", msg->folder_name);
+    } else {
+        snprintf(response.content, sizeof(response.content),
+                 "Failed to create folder: %s", get_error_message(result));
+    }
+    
+    send_message(socket, &response);
+    log_info("CREATEFOLDER response sent: %s", get_error_message(result));
+}
+
+void handle_move_request(int socket, Message* msg) {
+    log_info("MOVE request: file '%s' to folder '%s'", msg->filename, msg->folder_name);
+    
+    int result = folder_move_file(msg->filename, msg->folder_name, msg->sender_id);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    response.error_code = result;
+    
+    if (result == ERR_SUCCESS) {
+        snprintf(response.content, sizeof(response.content),
+                 "File '%s' moved to folder '%s'", msg->filename, msg->folder_name);
+    } else {
+        snprintf(response.content, sizeof(response.content),
+                 "Failed to move file: %s", get_error_message(result));
+    }
+    
+    send_message(socket, &response);
+    log_info("MOVE response sent: %s", get_error_message(result));
+}
+
+void handle_viewfolder_request(int socket, Message* msg) {
+    log_info("VIEWFOLDER request for folder '%s'", msg->folder_name);
+    
+    char files[MAX_FILES_PER_FOLDER][MAX_FILENAME_LEN];
+    int file_count = folder_list_files(msg->folder_name, files, MAX_FILES_PER_FOLDER);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    if (file_count < 0) {
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content),
+                 "Folder '%s' not found", msg->folder_name);
+    } else {
+        response.error_code = ERR_SUCCESS;
+        int offset = 0;
+        offset += snprintf(response.content + offset, sizeof(response.content) - offset,
+                          "Files in folder '%s' (%d):\n", msg->folder_name, file_count);
+        
+        for (int i = 0; i < file_count && offset < MAX_CONTENT_LEN - 50; i++) {
+            offset += snprintf(response.content + offset, sizeof(response.content) - offset,
+                             "  - %s\n", files[i]);
+        }
+    }
+    
+    send_message(socket, &response);
+    log_info("VIEWFOLDER response sent: %d files", file_count);
+}
+
+/* ============================================================================
+ * BONUS: CHECKPOINT OPERATIONS HANDLERS
+ * ============================================================================ */
+
+void handle_checkpoint_request(int socket, Message* msg) {
+    log_info("CHECKPOINT request: file '%s', tag '%s'", msg->filename, msg->checkpoint_tag);
+    
+    int result = checkpoint_create(msg->filename, msg->checkpoint_tag, msg->sender_id);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    response.error_code = result;
+    
+    if (result == ERR_CREATED) {
+        snprintf(response.content, sizeof(response.content),
+                 "Checkpoint '%s' created for file '%s'", msg->checkpoint_tag, msg->filename);
+    } else {
+        snprintf(response.content, sizeof(response.content),
+                 "Failed to create checkpoint: %s", get_error_message(result));
+    }
+    
+    send_message(socket, &response);
+    log_info("CHECKPOINT response sent: %s", get_error_message(result));
+}
+
+void handle_viewcheckpoint_request(int socket, Message* msg) {
+    log_info("VIEWCHECKPOINT request: file '%s', tag '%s'", msg->filename, msg->checkpoint_tag);
+    
+    char content[MAX_CONTENT_LEN];
+    int result = checkpoint_view(msg->filename, msg->checkpoint_tag, content, sizeof(content));
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    response.error_code = result;
+    
+    if (result == ERR_SUCCESS) {
+        strncpy(response.content, content, sizeof(response.content) - 1);
+        response.content[sizeof(response.content) - 1] = '\0';
+    } else {
+        snprintf(response.content, sizeof(response.content),
+                 "Failed to view checkpoint: %s", get_error_message(result));
+    }
+    
+    send_message(socket, &response);
+    log_info("VIEWCHECKPOINT response sent: %s", get_error_message(result));
+}
+
+void handle_revert_request(int socket, Message* msg) {
+    log_info("REVERT request: file '%s' to checkpoint '%s'", msg->filename, msg->checkpoint_tag);
+    
+    int result = checkpoint_revert(msg->filename, msg->checkpoint_tag, msg->sender_id);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    response.error_code = result;
+    
+    if (result == ERR_SUCCESS) {
+        snprintf(response.content, sizeof(response.content),
+                 "File '%s' reverted to checkpoint '%s'", msg->filename, msg->checkpoint_tag);
+    } else {
+        snprintf(response.content, sizeof(response.content),
+                 "Failed to revert: %s", get_error_message(result));
+    }
+    
+    send_message(socket, &response);
+    log_info("REVERT response sent: %s", get_error_message(result));
+}
+
+void handle_listcheckpoints_request(int socket, Message* msg) {
+    log_info("LISTCHECKPOINTS request for file '%s'", msg->filename);
+    
+    char tags[MAX_CHECKPOINTS][MAX_TAG_LEN];
+    int count = checkpoint_list(msg->filename, tags, MAX_CHECKPOINTS);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    response.error_code = ERR_SUCCESS;
+    
+    int offset = 0;
+    offset += snprintf(response.content + offset, sizeof(response.content) - offset,
+                      "Checkpoints for '%s' (%d):\n", msg->filename, count);
+    
+    for (int i = 0; i < count && offset < MAX_CONTENT_LEN - 50; i++) {
+        offset += snprintf(response.content + offset, sizeof(response.content) - offset,
+                         "  - %s\n", tags[i]);
+    }
+    
+    send_message(socket, &response);
+    log_info("LISTCHECKPOINTS response sent: %d checkpoints", count);
+}
+
 
 /* ============================================================================
  * SERVER THREADS (Modified)
@@ -811,6 +986,18 @@ void* ns_inbound_thread(void* arg) {
             
             send_message(ns_conn_socket, &response);
             log_info("Sent metadata response to NS");
+            close_socket(ns_conn_socket);
+            continue;
+        } else if (msg.operation == OP_CREATEFOLDER) {
+            handle_createfolder_request(&msg, ns_conn_socket);
+            close_socket(ns_conn_socket);
+            continue;
+        } else if (msg.operation == OP_MOVE) {
+            handle_move_request(&msg, ns_conn_socket);
+            close_socket(ns_conn_socket);
+            continue;
+        } else if (msg.operation == OP_VIEWFOLDER) {
+            handle_viewfolder_request(&msg, ns_conn_socket);
             close_socket(ns_conn_socket);
             continue;
         } else {
@@ -930,6 +1117,22 @@ void* client_server_thread(void* arg) {
                     
                 case OP_STREAM:
                     handle_stream_request(client_socket, &msg);
+                    break;
+                    
+                case OP_CHECKPOINT:
+                    handle_checkpoint_request(&msg, client_socket);
+                    break;
+                    
+                case OP_VIEWCHECKPOINT:
+                    handle_viewcheckpoint_request(&msg, client_socket);
+                    break;
+                    
+                case OP_REVERT:
+                    handle_revert_request(&msg, client_socket);
+                    break;
+                    
+                case OP_LISTCHECKPOINTS:
+                    handle_listcheckpoints_request(&msg, client_socket);
                     break;
                     
                 default:

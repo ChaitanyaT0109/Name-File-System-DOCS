@@ -88,7 +88,7 @@ main: nameserver storageserver client
 
 nameserver: $(NAMESERVER)
 
-$(NAMESERVER): $(NS_DIR)/nameserver.c $(NS_DIR)/acl.o $(COMMON_OBJS)
+$(NAMESERVER): $(NS_DIR)/nameserver.c $(NS_DIR)/acl.o $(NS_DIR)/access_requests.o $(COMMON_OBJS)
 	@echo "Building nameserver..."
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
@@ -97,9 +97,14 @@ $(NS_DIR)/acl.o: $(NS_DIR)/acl.c $(NS_DIR)/acl.h $(COMMON_DIR)/protocol.h $(COMM
 	@echo "Building ACL module..."
 	$(CC) $(CFLAGS) -c $(NS_DIR)/acl.c -o $@
 
+# Access requests module for nameserver (BONUS)
+$(NS_DIR)/access_requests.o: $(NS_DIR)/access_requests.c $(NS_DIR)/access_requests.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
+	@echo "Building access_requests module..."
+	$(CC) $(CFLAGS) -c $(NS_DIR)/access_requests.c -o $@
+
 storageserver: $(STORAGESERVER)
 
-$(STORAGESERVER): $(SS_DIR)/storage_server.c $(SS_DIR)/sentence_lock.o $(SS_DIR)/sentence_parser.o $(SS_DIR)/undo_buffer.o $(COMMON_OBJS)
+$(STORAGESERVER): $(SS_DIR)/storage_server.c $(SS_DIR)/sentence_lock.o $(SS_DIR)/sentence_parser.o $(SS_DIR)/undo_buffer.o $(SS_DIR)/folder_manager.o $(SS_DIR)/checkpoint_manager.o $(COMMON_OBJS)
 	@echo "Building storage_server..."
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lpthread
 
@@ -117,6 +122,16 @@ $(SS_DIR)/sentence_parser.o: $(SS_DIR)/sentence_parser.c $(SS_DIR)/sentence_pars
 $(SS_DIR)/undo_buffer.o: $(SS_DIR)/undo_buffer.c $(SS_DIR)/undo_buffer.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
 	@echo "Building undo_buffer module..."
 	$(CC) $(CFLAGS) -c $(SS_DIR)/undo_buffer.c -o $@
+
+# Folder manager module for storage server (BONUS)
+$(SS_DIR)/folder_manager.o: $(SS_DIR)/folder_manager.c $(SS_DIR)/folder_manager.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
+	@echo "Building folder_manager module..."
+	$(CC) $(CFLAGS) -c $(SS_DIR)/folder_manager.c -o $@
+
+# Checkpoint manager module for storage server (BONUS)
+$(SS_DIR)/checkpoint_manager.o: $(SS_DIR)/checkpoint_manager.c $(SS_DIR)/checkpoint_manager.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
+	@echo "Building checkpoint_manager module..."
+	$(CC) $(CFLAGS) -c $(SS_DIR)/checkpoint_manager.c -o $@
 
 client: $(CLIENT)
 

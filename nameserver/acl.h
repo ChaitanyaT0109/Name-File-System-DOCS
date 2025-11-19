@@ -220,4 +220,22 @@ void acl_stats(AclTable* acl);
  */
 int acl_get_all_users(AclTable* acl, char users[][MAX_USERNAME_LEN], int max_users);
 
+/**
+ * Check if user can access file (read or write)
+ * Returns 1 if user has any access, 0 otherwise
+ */
+int acl_can_access(AclTable* acl, const char* filename, const char* username);
+
+/**
+ * Check if user is owner of file
+ * Returns 1 if user is owner, 0 otherwise
+ */
+int acl_is_owner(AclTable* acl, const char* filename, const char* username);
+
+/**
+ * Add user with read access to file
+ * Returns 0 on success, -1 on error
+ */
+int acl_add_user(AclTable* acl, const char* filename, const char* username);
+
 #endif /* ACL_H */

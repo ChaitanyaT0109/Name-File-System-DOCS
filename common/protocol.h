@@ -58,6 +58,27 @@
 #define OP_WRITE_UPDATE     71  // Send word update
 #define OP_WRITE_COMMIT     72  // ETIRW - commit changes
 
+// Bonus: Folder Operations (80-89)
+#define OP_CREATEFOLDER     80  // Create folder
+#define OP_MOVE             81  // Move file to folder
+#define OP_VIEWFOLDER       82  // List files in folder
+
+// Bonus: Checkpoint Operations (90-99)
+#define OP_CHECKPOINT       90  // Create checkpoint
+#define OP_VIEWCHECKPOINT   91  // View checkpoint content
+#define OP_REVERT           92  // Revert to checkpoint
+#define OP_LISTCHECKPOINTS  93  // List all checkpoints
+
+// Bonus: Access Request Operations (100-109)
+#define OP_REQUESTACCESS    100 // Request access to file
+#define OP_VIEWREQUESTS     101 // View pending requests
+#define OP_APPROVEREQUEST   102 // Approve access request
+#define OP_DENYREQUEST      103 // Deny access request
+
+// Bonus: Replication Operations (110-119)
+#define OP_REPLICATE        110 // Replicate file to backup SS
+#define OP_HEARTBEAT        111 // SS heartbeat
+
 /* ============================================================================
  * ERROR CODES - Standard HTTP-like error codes
  * ============================================================================ */
@@ -71,8 +92,10 @@
 #define ERR_BAD_REQUEST     400  // Invalid request format
 #define ERR_UNAUTHORIZED    401  // Not registered
 #define ERR_ACCESS_DENIED   403  // No permission
+#define ERR_PERMISSION_DENIED 403  // Alias for ACCESS_DENIED
 #define ERR_NOT_FOUND       404  // File/User not found
 #define ERR_CONFLICT        409  // File already exists
+#define ERR_ALREADY_EXISTS  409  // Alias for CONFLICT
 #define ERR_LOCKED          423  // Sentence locked by another user
 #define ERR_INDEX_ERROR     450  // Invalid sentence/word index
 
@@ -127,6 +150,14 @@ typedef struct {
     /* Access Control */
     int access_type;                    // ACCESS_READ, ACCESS_WRITE, etc.
     int view_flags;                     // For VIEW command flags
+    
+    /* Bonus: Folder Operations */
+    char folder_name[MAX_FILENAME_LEN]; // For folder operations
+    char checkpoint_tag[MAX_FILENAME_LEN]; // For checkpoint operations
+    
+    /* Bonus: Replication */
+    int replica_index;                  // Which replica to use
+    int is_primary;                     // Primary vs backup SS
     
     /* Routing Info (for NS responses) */
     char ss_ip[MAX_IP_LEN];            // Storage Server IP
@@ -306,6 +337,23 @@ static const char* get_operation_name(int operation) {
         case OP_WRITE_START:        return "WRITE_START";
         case OP_WRITE_UPDATE:       return "WRITE_UPDATE";
         case OP_WRITE_COMMIT:       return "WRITE_COMMIT";
+        
+        case OP_CREATEFOLDER:       return "CREATEFOLDER";
+        case OP_MOVE:               return "MOVE";
+        case OP_VIEWFOLDER:         return "VIEWFOLDER";
+        
+        case OP_CHECKPOINT:         return "CHECKPOINT";
+        case OP_VIEWCHECKPOINT:     return "VIEWCHECKPOINT";
+        case OP_REVERT:             return "REVERT";
+        case OP_LISTCHECKPOINTS:    return "LISTCHECKPOINTS";
+        
+        case OP_REQUESTACCESS:      return "REQUESTACCESS";
+        case OP_VIEWREQUESTS:       return "VIEWREQUESTS";
+        case OP_APPROVEREQUEST:     return "APPROVEREQUEST";
+        case OP_DENYREQUEST:        return "DENYREQUEST";
+        
+        case OP_REPLICATE:          return "REPLICATE";
+        case OP_HEARTBEAT:          return "HEARTBEAT";
         
         default:                    return "UNKNOWN";
     }

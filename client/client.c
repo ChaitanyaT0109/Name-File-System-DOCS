@@ -1153,6 +1153,614 @@ void cmd_exec(const char* filename) {
     log_info("EXEC completed");
 }
 
+/* ============================================================================
+ * BONUS FEATURES - Command Implementations
+ * ============================================================================ */
+
+// CREATEFOLDER - Create a new folder (Bonus: Hierarchical folders)
+void cmd_createfolder(const char* foldername) {
+    if (strlen(foldername) == 0) {
+        printf("Error: Folder name cannot be empty\n");
+        printf("Usage: CREATEFOLDER <foldername>\n");
+        return;
+    }
+    
+    log_info("CREATEFOLDER: '%s'", foldername);
+    
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_CREATEFOLDER;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.folder_name, foldername, MAX_FILENAME_LEN - 1);
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response from server\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code == ERR_SUCCESS) {
+        printf("Folder '%s' created successfully!\n", foldername);
+        log_info("CREATEFOLDER successful: %s", foldername);
+    } else {
+        printf("Error: %s\n", response.content);
+        log_error("CREATEFOLDER failed: %s", get_error_message(response.error_code));
+    }
+}
+
+// MOVE - Move file to folder (Bonus: Hierarchical folders)
+void cmd_move(const char* filename, const char* foldername) {
+    if (strlen(filename) == 0 || strlen(foldername) == 0) {
+        printf("Error: Filename and folder name cannot be empty\n");
+        printf("Usage: MOVE <filename> <foldername>\n");
+        return;
+    }
+    
+    log_info("MOVE: '%s' -> '%s'", filename, foldername);
+    
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_MOVE;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    strncpy(msg.folder_name, foldername, MAX_FILENAME_LEN - 1);
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response from server\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code == ERR_SUCCESS) {
+        printf("File '%s' moved to '%s' successfully!\n", filename, foldername);
+        log_info("MOVE successful");
+    } else {
+        printf("Error: %s\n", response.content);
+        log_error("MOVE failed: %s", get_error_message(response.error_code));
+    }
+}
+
+// VIEWFOLDER - List folder contents (Bonus: Hierarchical folders)
+void cmd_viewfolder(const char* foldername) {
+    if (strlen(foldername) == 0) {
+        printf("Error: Folder name cannot be empty\n");
+        printf("Usage: VIEWFOLDER <foldername>\n");
+        return;
+    }
+    
+    log_info("VIEWFOLDER: '%s'", foldername);
+    
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_VIEWFOLDER;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.folder_name, foldername, MAX_FILENAME_LEN - 1);
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response from server\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code == ERR_SUCCESS) {
+        printf("Contents of folder '%s':\n", foldername);
+        printf("%s\n", response.content);
+        log_info("VIEWFOLDER successful");
+    } else {
+        printf("Error: %s\n", response.content);
+        log_error("VIEWFOLDER failed: %s", get_error_message(response.error_code));
+    }
+}
+
+// CHECKPOINT - Create a checkpoint (Bonus: Checkpoints)
+void cmd_checkpoint(const char* filename, const char* tag) {
+    if (strlen(filename) == 0 || strlen(tag) == 0) {
+        printf("Error: Filename and tag cannot be empty\n");
+        printf("Usage: CHECKPOINT <filename> <tag>\n");
+        return;
+    }
+    
+    log_info("CHECKPOINT: '%s' tag '%s'", filename, tag);
+    
+    // First get SS info from NS
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_READ;  // Use READ to get SS info
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to get file location\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code != ERR_SUCCESS) {
+        printf("Error: %s\n", response.content);
+        return;
+    }
+    
+    // Connect to SS directly
+    int ss_socket = create_socket();
+    if (ss_socket < 0 || connect_to_server(ss_socket, response.ip_address, response.nm_port) < 0) {
+        printf("Error: Failed to connect to Storage Server\n");
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    // Send checkpoint request
+    Message checkpoint_msg;
+    INIT_MESSAGE(checkpoint_msg);
+    checkpoint_msg.operation = OP_CHECKPOINT;
+    strncpy(checkpoint_msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(checkpoint_msg.filename, filename, MAX_FILENAME_LEN - 1);
+    strncpy(checkpoint_msg.checkpoint_tag, tag, MAX_FILENAME_LEN - 1);
+    
+    send_message(ss_socket, &checkpoint_msg);
+    
+    if (receive_message(ss_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ss_socket);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    if (response.error_code == ERR_SUCCESS) {
+        printf("Checkpoint '%s' created for file '%s'\n", tag, filename);
+        log_info("CHECKPOINT successful");
+    } else {
+        printf("Error: %s\n", response.content);
+        log_error("CHECKPOINT failed: %s", get_error_message(response.error_code));
+    }
+}
+
+// VIEWCHECKPOINT - View checkpoint content (Bonus: Checkpoints)
+void cmd_viewcheckpoint(const char* filename, const char* tag) {
+    if (strlen(filename) == 0 || strlen(tag) == 0) {
+        printf("Error: Filename and tag cannot be empty\n");
+        printf("Usage: VIEWCHECKPOINT <filename> <tag>\n");
+        return;
+    }
+    
+    log_info("VIEWCHECKPOINT: '%s' tag '%s'", filename, tag);
+    
+    // Get SS info from NS
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_READ;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to get file location\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code != ERR_SUCCESS) {
+        printf("Error: %s\n", response.content);
+        return;
+    }
+    
+    // Connect to SS
+    int ss_socket = create_socket();
+    if (ss_socket < 0 || connect_to_server(ss_socket, response.ip_address, response.nm_port) < 0) {
+        printf("Error: Failed to connect to Storage Server\n");
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    Message view_msg;
+    INIT_MESSAGE(view_msg);
+    view_msg.operation = OP_VIEWCHECKPOINT;
+    strncpy(view_msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(view_msg.filename, filename, MAX_FILENAME_LEN - 1);
+    strncpy(view_msg.checkpoint_tag, tag, MAX_FILENAME_LEN - 1);
+    
+    send_message(ss_socket, &view_msg);
+    
+    if (receive_message(ss_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ss_socket);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    if (response.error_code == ERR_SUCCESS) {
+        printf("\n=== Checkpoint '%s' of '%s' ===\n", tag, filename);
+        printf("%s\n", response.content);
+        log_info("VIEWCHECKPOINT successful");
+    } else {
+        printf("Error: %s\n", response.content);
+        log_error("VIEWCHECKPOINT failed: %s", get_error_message(response.error_code));
+    }
+}
+
+// REVERT - Revert to checkpoint (Bonus: Checkpoints)
+void cmd_revert(const char* filename, const char* tag) {
+    if (strlen(filename) == 0 || strlen(tag) == 0) {
+        printf("Error: Filename and tag cannot be empty\n");
+        printf("Usage: REVERT <filename> <tag>\n");
+        return;
+    }
+    
+    log_info("REVERT: '%s' to tag '%s'", filename, tag);
+    
+    // Get SS info
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_READ;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to get file location\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code != ERR_SUCCESS) {
+        printf("Error: %s\n", response.content);
+        return;
+    }
+    
+    // Connect to SS
+    int ss_socket = create_socket();
+    if (ss_socket < 0 || connect_to_server(ss_socket, response.ip_address, response.nm_port) < 0) {
+        printf("Error: Failed to connect to Storage Server\n");
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    Message revert_msg;
+    INIT_MESSAGE(revert_msg);
+    revert_msg.operation = OP_REVERT;
+    strncpy(revert_msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(revert_msg.filename, filename, MAX_FILENAME_LEN - 1);
+    strncpy(revert_msg.checkpoint_tag, tag, MAX_FILENAME_LEN - 1);
+    
+    send_message(ss_socket, &revert_msg);
+    
+    if (receive_message(ss_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ss_socket);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    if (response.error_code == ERR_SUCCESS) {
+        printf("File '%s' reverted to checkpoint '%s'\n", filename, tag);
+        log_info("REVERT successful");
+    } else {
+        printf("Error: %s\n", response.content);
+        log_error("REVERT failed: %s", get_error_message(response.error_code));
+    }
+}
+
+// LISTCHECKPOINTS - List all checkpoints (Bonus: Checkpoints)
+void cmd_listcheckpoints(const char* filename) {
+    if (strlen(filename) == 0) {
+        printf("Error: Filename cannot be empty\n");
+        printf("Usage: LISTCHECKPOINTS <filename>\n");
+        return;
+    }
+    
+    log_info("LISTCHECKPOINTS: '%s'", filename);
+    
+    // Get SS info
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_READ;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to get file location\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code != ERR_SUCCESS) {
+        printf("Error: %s\n", response.content);
+        return;
+    }
+    
+    // Connect to SS
+    int ss_socket = create_socket();
+    if (ss_socket < 0 || connect_to_server(ss_socket, response.ip_address, response.nm_port) < 0) {
+        printf("Error: Failed to connect to Storage Server\n");
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    Message list_msg;
+    INIT_MESSAGE(list_msg);
+    list_msg.operation = OP_LISTCHECKPOINTS;
+    strncpy(list_msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(list_msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    send_message(ss_socket, &list_msg);
+    
+    if (receive_message(ss_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ss_socket);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    if (response.error_code == ERR_SUCCESS) {
+        printf("Checkpoints for '%s':\n", filename);
+        printf("%s\n", response.content);
+        log_info("LISTCHECKPOINTS successful");
+    } else {
+        printf("Error: %s\n", response.content);
+        log_error("LISTCHECKPOINTS failed: %s", get_error_message(response.error_code));
+    }
+}
+
+// REQUESTACCESS - Request access to file (Bonus: Access requests)
+void cmd_requestaccess(const char* filename) {
+    if (strlen(filename) == 0) {
+        printf("Error: Filename cannot be empty\n");
+        printf("Usage: REQUESTACCESS <filename>\n");
+        return;
+    }
+    
+    log_info("REQUESTACCESS: '%s'", filename);
+    
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_REQUESTACCESS;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code == ERR_SUCCESS) {
+        printf("%s\n", response.content);
+        log_info("REQUESTACCESS successful");
+    } else {
+        printf("Error: %s\n", response.content);
+        log_error("REQUESTACCESS failed: %s", get_error_message(response.error_code));
+    }
+}
+
+// VIEWREQUESTS - View pending requests (Bonus: Access requests)
+void cmd_viewrequests(const char* filename) {
+    if (strlen(filename) == 0) {
+        printf("Error: Filename cannot be empty\n");
+        printf("Usage: VIEWREQUESTS <filename>\n");
+        return;
+    }
+    
+    log_info("VIEWREQUESTS: '%s'", filename);
+    
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_VIEWREQUESTS;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code == ERR_SUCCESS) {
+        printf("Pending access requests for '%s':\n", filename);
+        printf("%s\n", response.content);
+        log_info("VIEWREQUESTS successful");
+    } else {
+        printf("Error: %s\n", response.content);
+        log_error("VIEWREQUESTS failed: %s", get_error_message(response.error_code));
+    }
+}
+
+// APPROVEREQUEST - Approve access request (Bonus: Access requests)
+void cmd_approverequest(const char* filename, const char* username) {
+    if (strlen(filename) == 0 || strlen(username) == 0) {
+        printf("Error: Filename and username cannot be empty\n");
+        printf("Usage: APPROVEREQUEST <filename> <username>\n");
+        return;
+    }
+    
+    log_info("APPROVEREQUEST: '%s' for user '%s'", filename, username);
+    
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_APPROVEREQUEST;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    strncpy(msg.content, username, MAX_CONTENT_LEN - 1);  // Username in content field
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code == ERR_SUCCESS) {
+        printf("%s\n", response.content);
+        log_info("APPROVEREQUEST successful");
+    } else {
+        printf("Error: %s\n", response.content);
+        log_error("APPROVEREQUEST failed: %s", get_error_message(response.error_code));
+    }
+}
+
+// DENYREQUEST - Deny access request (Bonus: Access requests)
+void cmd_denyrequest(const char* filename, const char* username) {
+    if (strlen(filename) == 0 || strlen(username) == 0) {
+        printf("Error: Filename and username cannot be empty\n");
+        printf("Usage: DENYREQUEST <filename> <username>\n");
+        return;
+    }
+    
+    log_info("DENYREQUEST: '%s' for user '%s'", filename, username);
+    
+    int ns_socket = create_socket();
+    if (ns_socket < 0 || connect_to_server(ns_socket, NS_IP, NS_PORT) < 0) {
+        printf("Error: Failed to connect to Name Server\n");
+        if (ns_socket >= 0) close_socket(ns_socket);
+        return;
+    }
+    
+    Message msg;
+    INIT_MESSAGE(msg);
+    msg.operation = OP_DENYREQUEST;
+    strncpy(msg.sender_id, current_username, MAX_USERNAME_LEN - 1);
+    strncpy(msg.filename, filename, MAX_FILENAME_LEN - 1);
+    strncpy(msg.content, username, MAX_CONTENT_LEN - 1);  // Username in content field
+    
+    send_message(ns_socket, &msg);
+    
+    Message response;
+    if (receive_message(ns_socket, &response) <= 0) {
+        printf("Error: Failed to receive response\n");
+        close_socket(ns_socket);
+        return;
+    }
+    
+    close_socket(ns_socket);
+    
+    if (response.error_code == ERR_SUCCESS) {
+        printf("%s\n", response.content);
+        log_info("DENYREQUEST successful");
+    } else {
+        printf("Error: %s\n", response.content);
+        log_error("DENYREQUEST failed: %s", get_error_message(response.error_code));
+    }
+}
+
 void cmd_help() {
     printf("\n");
     printf("Available Commands:\n");
@@ -1181,6 +1789,23 @@ void cmd_help() {
     printf("  User Management:\n");
     printf("    LIST                             - Show all registered users\n");
     printf("\n");
+    printf("  BONUS - Hierarchical Folders:\n");
+    printf("    CREATEFOLDER <foldername>        - Create a new folder\n");
+    printf("    MOVE <filename> <foldername>     - Move file to folder\n");
+    printf("    VIEWFOLDER <foldername>          - List files in folder\n");
+    printf("\n");
+    printf("  BONUS - Checkpoints:\n");
+    printf("    CHECKPOINT <file> <tag>          - Create a checkpoint\n");
+    printf("    VIEWCHECKPOINT <file> <tag>      - View checkpoint content\n");
+    printf("    REVERT <file> <tag>              - Revert to checkpoint\n");
+    printf("    LISTCHECKPOINTS <file>           - List all checkpoints\n");
+    printf("\n");
+    printf("  BONUS - Access Requests:\n");
+    printf("    REQUESTACCESS <filename>         - Request access to file\n");
+    printf("    VIEWREQUESTS <filename>          - View pending requests (owner)\n");
+    printf("    APPROVEREQUEST <file> <user>     - Approve access request\n");
+    printf("    DENYREQUEST <file> <user>        - Deny access request\n");
+    printf("\n");
     printf("  General:\n");
     printf("    HELP                             - Show this help message\n");
     printf("    EXIT                             - Exit the client\n");
@@ -1197,6 +1822,10 @@ void cmd_help() {
     printf("  INFO mydoc.txt\n");
     printf("  ADDACCESS -R mydoc.txt alice\n");
     printf("  LIST\n");
+    printf("  CREATEFOLDER reports\n");
+    printf("  MOVE mydoc.txt reports\n");
+    printf("  CHECKPOINT mydoc.txt v1\n");
+    printf("  REQUESTACCESS mydoc.txt\n");
     printf("\n");
 }
 
@@ -1301,6 +1930,28 @@ int main() {
             cmd_addaccess(arg1, arg2, arg3);
         } else if (strcmp(command, "REMACCESS") == 0) {
             cmd_remaccess(arg1, arg2);
+        } else if (strcmp(command, "CREATEFOLDER") == 0) {
+            cmd_createfolder(arg1);
+        } else if (strcmp(command, "MOVE") == 0) {
+            cmd_move(arg1, arg2);
+        } else if (strcmp(command, "VIEWFOLDER") == 0) {
+            cmd_viewfolder(arg1);
+        } else if (strcmp(command, "CHECKPOINT") == 0) {
+            cmd_checkpoint(arg1, arg2);
+        } else if (strcmp(command, "VIEWCHECKPOINT") == 0) {
+            cmd_viewcheckpoint(arg1, arg2);
+        } else if (strcmp(command, "REVERT") == 0) {
+            cmd_revert(arg1, arg2);
+        } else if (strcmp(command, "LISTCHECKPOINTS") == 0) {
+            cmd_listcheckpoints(arg1);
+        } else if (strcmp(command, "REQUESTACCESS") == 0) {
+            cmd_requestaccess(arg1);
+        } else if (strcmp(command, "VIEWREQUESTS") == 0) {
+            cmd_viewrequests(arg1);
+        } else if (strcmp(command, "APPROVEREQUEST") == 0) {
+            cmd_approverequest(arg1, arg2);
+        } else if (strcmp(command, "DENYREQUEST") == 0) {
+            cmd_denyrequest(arg1, arg2);
         } else if (strcmp(command, "HELP") == 0) {
             cmd_help();
         } else if (strcmp(command, "EXIT") == 0 || strcmp(command, "QUIT") == 0) {

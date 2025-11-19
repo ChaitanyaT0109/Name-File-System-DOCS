@@ -17,6 +17,7 @@
 #include "logger.h"
 #include "protocol.h"
 #include "acl.h"
+#include "access_requests.h"
 
 #define NS_PORT 8080
 #define MAX_CONNECTIONS 50
@@ -141,6 +142,10 @@ void init_registries() {
     } else {
         log_info("Starting with empty ACL (no saved data)");
     }
+    
+    // Initialize Access Requests System
+    request_init();
+    log_info("Access request system initialized");
 }
 
 /* ============================================================================
@@ -1490,6 +1495,323 @@ void handle_info_request(int client_socket, Message* msg) {
 }
 
 /* ============================================================================
+ * BONUS FEATURES - Request Handlers
+ * ============================================================================ */
+
+// Handle CREATEFOLDER request (Bonus: Hierarchical folders)
+void handle_createfolder_request(int client_socket, Message* msg) {
+    log_info("CREATEFOLDER request from %s for folder '%s'", msg->sender_id, msg->folder_name);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    // Check permissions (owner only)
+    if (!acl_can_access(&acl_table, msg->filename, msg->sender_id)) {
+        log_warning("CREATEFOLDER denied: %s has no access to '%s'", msg->sender_id, msg->filename);
+        response.error_code = ERR_PERMISSION_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                "Permission denied: You don't have access to this path");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Find storage server
+    int ss_index = hashmap_find( msg->filename);
+    if (ss_index < 0) {
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content), "Base path not found");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Forward to storage server
+    int ss_socket = create_socket();
+    if (ss_socket < 0 ||
+        connect_to_server(ss_socket, storage_servers[ss_index].base.ip,
+                         storage_servers[ss_index].base.nm_port) < 0) {
+        log_error("Failed to connect to SS for CREATEFOLDER");
+        response.error_code = ERR_SS_UNAVAILABLE;
+        strcpy(response.content, "Storage server unavailable");
+        send_message(client_socket, &response);
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    send_message(ss_socket, msg);
+    receive_message(ss_socket, &response);
+    close_socket(ss_socket);
+    
+    send_message(client_socket, &response);
+    log_info("CREATEFOLDER: Forwarded to SS[%d], result: %s", 
+             ss_index, get_error_message(response.error_code));
+}
+
+// Handle MOVE request (Bonus: Move files between folders)
+void handle_move_request(int client_socket, Message* msg) {
+    log_info("MOVE request from %s: '%s' -> '%s'", msg->sender_id, msg->filename, msg->folder_name);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    // Check permissions
+    if (!acl_is_owner(&acl_table, msg->filename, msg->sender_id)) {
+        response.error_code = ERR_PERMISSION_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                "Permission denied: Only owner can move files");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Find storage server
+    int ss_index = hashmap_find( msg->filename);
+    if (ss_index < 0) {
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content), "File not found");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Forward to storage server
+    int ss_socket = create_socket();
+    if (ss_socket < 0 ||
+        connect_to_server(ss_socket, storage_servers[ss_index].base.ip,
+                         storage_servers[ss_index].base.nm_port) < 0) {
+        response.error_code = ERR_SS_UNAVAILABLE;
+        strcpy(response.content, "Storage server unavailable");
+        send_message(client_socket, &response);
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    send_message(ss_socket, msg);
+    receive_message(ss_socket, &response);
+    close_socket(ss_socket);
+    
+    send_message(client_socket, &response);
+    log_info("MOVE: Forwarded to SS[%d], result: %s", 
+             ss_index, get_error_message(response.error_code));
+}
+
+// Handle VIEWFOLDER request (Bonus: List folder contents)
+void handle_viewfolder_request(int client_socket, Message* msg) {
+    log_info("VIEWFOLDER request from %s for '%s'", msg->sender_id, msg->folder_name);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    // Check permissions
+    if (!acl_can_access(&acl_table, msg->filename, msg->sender_id)) {
+        response.error_code = ERR_PERMISSION_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                "Permission denied");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Find storage server
+    int ss_index = hashmap_find( msg->filename);
+    if (ss_index < 0) {
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content), "Path not found");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Forward to storage server
+    int ss_socket = create_socket();
+    if (ss_socket < 0 ||
+        connect_to_server(ss_socket, storage_servers[ss_index].base.ip,
+                         storage_servers[ss_index].base.nm_port) < 0) {
+        response.error_code = ERR_SS_UNAVAILABLE;
+        strcpy(response.content, "Storage server unavailable");
+        send_message(client_socket, &response);
+        if (ss_socket >= 0) close_socket(ss_socket);
+        return;
+    }
+    
+    send_message(ss_socket, msg);
+    receive_message(ss_socket, &response);
+    close_socket(ss_socket);
+    
+    send_message(client_socket, &response);
+    log_info("VIEWFOLDER: Sent folder listing to %s", msg->sender_id);
+}
+
+// Handle REQUESTACCESS (Bonus: Access request system)
+void handle_requestaccess_request(int client_socket, Message* msg) {
+    log_info("REQUESTACCESS from %s for file '%s'", msg->sender_id, msg->filename);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    // Check if file exists
+    int ss_index = hashmap_find( msg->filename);
+    if (ss_index < 0) {
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content), "File not found");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Check if already has access
+    if (acl_can_access(&acl_table, msg->filename, msg->sender_id)) {
+        response.error_code = ERR_ALREADY_EXISTS;
+        snprintf(response.content, sizeof(response.content), 
+                "You already have access to this file");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Get owner
+    char owner[MAX_USERNAME_LEN];
+    if (acl_get_owner(&acl_table, msg->filename, owner, sizeof(owner)) < 0) {
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content), "File owner not found");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Add request
+    int result = request_add(&global_request_table, msg->filename, msg->sender_id, 
+                            owner, ACCESS_READ);
+    if (result == ERR_SUCCESS) {
+        response.error_code = ERR_SUCCESS;
+        snprintf(response.content, sizeof(response.content),
+                "Access request submitted. Owner will be notified.");
+        log_info("Access request added: %s -> %s", msg->sender_id, msg->filename);
+    } else {
+        response.error_code = ERR_SERVER_ERROR;
+        snprintf(response.content, sizeof(response.content), "Failed to submit request");
+    }
+    
+    send_message(client_socket, &response);
+}
+
+// Handle VIEWREQUESTS (Bonus: View pending access requests)
+void handle_viewrequests_request(int client_socket, Message* msg) {
+    log_info("VIEWREQUESTS from %s for file '%s'", msg->sender_id, msg->filename);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    // Check if requester is owner
+    if (!acl_is_owner(&acl_table, msg->filename, msg->sender_id)) {
+        response.error_code = ERR_PERMISSION_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                "Permission denied: Only owner can view requests");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Get requests
+    AccessRequest requests[100];
+    int count = request_get_for_owner(&global_request_table, msg->sender_id, 
+                                      requests, 100);
+    
+    response.error_code = ERR_SUCCESS;
+    if (count == 0) {
+        snprintf(response.content, sizeof(response.content), 
+                "No pending access requests for this file");
+    } else {
+        char* ptr = response.content;
+        int remaining = sizeof(response.content);
+        int written = 0;
+        
+        for (int i = 0; i < count && remaining > 50; i++) {
+            if (strcmp(requests[i].filename, msg->filename) == 0) {
+                written = snprintf(ptr, remaining, "%s requests access to %s\n",
+                                 requests[i].requester, requests[i].filename);
+                ptr += written;
+                remaining -= written;
+            }
+        }
+        
+        if (ptr == response.content) {
+            snprintf(response.content, sizeof(response.content),
+                    "No pending requests for this specific file");
+        }
+    }
+    
+    send_message(client_socket, &response);
+    log_info("VIEWREQUESTS: Sent %d requests to %s", count, msg->sender_id);
+}
+
+// Handle APPROVEREQUEST (Bonus: Approve access request)
+void handle_approverequest_request(int client_socket, Message* msg) {
+    log_info("APPROVEREQUEST from %s: grant '%s' access to '%s'",
+             msg->sender_id, msg->content, msg->filename);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    // Check if requester is owner
+    if (!acl_is_owner(&acl_table, msg->filename, msg->sender_id)) {
+        response.error_code = ERR_PERMISSION_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                "Permission denied: Only owner can approve requests");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Approve request
+    if (request_approve(&global_request_table, msg->filename, msg->content, msg->sender_id) == ERR_SUCCESS) {
+        // Grant actual access
+        if (acl_add_user(&acl_table, msg->filename, msg->content) == 0) {
+            response.error_code = ERR_SUCCESS;
+            snprintf(response.content, sizeof(response.content),
+                    "Access granted to %s", msg->content);
+            log_info("Access granted: %s can now access '%s'", msg->content, msg->filename);
+        } else {
+            response.error_code = ERR_SERVER_ERROR;
+            snprintf(response.content, sizeof(response.content), "Failed to grant access");
+        }
+    } else {
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content), "Request not found");
+    }
+    
+    send_message(client_socket, &response);
+}
+
+// Handle DENYREQUEST (Bonus: Deny access request)
+void handle_denyrequest_request(int client_socket, Message* msg) {
+    log_info("DENYREQUEST from %s: deny '%s' access to '%s'",
+             msg->sender_id, msg->content, msg->filename);
+    
+    Message response;
+    INIT_MESSAGE(response);
+    response.operation = OP_ACK;
+    
+    // Check if requester is owner
+    if (!acl_is_owner(&acl_table, msg->filename, msg->sender_id)) {
+        response.error_code = ERR_PERMISSION_DENIED;
+        snprintf(response.content, sizeof(response.content),
+                "Permission denied: Only owner can deny requests");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Deny request
+    if (request_deny(&global_request_table, msg->filename, msg->content, msg->sender_id) == ERR_SUCCESS) {
+        response.error_code = ERR_SUCCESS;
+        snprintf(response.content, sizeof(response.content),
+                "Request denied for %s", msg->content);
+        log_info("Access request denied: %s for file '%s'", msg->content, msg->filename);
+    } else {
+        response.error_code = ERR_NOT_FOUND;
+        snprintf(response.content, sizeof(response.content), "Request not found");
+    }
+    
+    send_message(client_socket, &response);
+}
+
+/* ============================================================================
  * REQUEST HANDLER - Process client/SS requests
  * ============================================================================ */
 
@@ -1589,6 +1911,41 @@ void handle_connection(int conn_socket, char* client_ip, int client_port) {
             
         case OP_EXEC:
             handle_exec_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_CREATEFOLDER:
+            handle_createfolder_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_MOVE:
+            handle_move_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_VIEWFOLDER:
+            handle_viewfolder_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_REQUESTACCESS:
+            handle_requestaccess_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_VIEWREQUESTS:
+            handle_viewrequests_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_APPROVEREQUEST:
+            handle_approverequest_request(conn_socket, &msg);
+            close_socket(conn_socket);
+            break;
+            
+        case OP_DENYREQUEST:
+            handle_denyrequest_request(conn_socket, &msg);
             close_socket(conn_socket);
             break;
             
