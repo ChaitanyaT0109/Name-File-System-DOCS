@@ -1191,11 +1191,11 @@ void cmd_createfolder(const char* foldername) {
     
     close_socket(ns_socket);
     
-    if (response.error_code == ERR_SUCCESS) {
-        printf("Folder '%s' created successfully!\n", foldername);
+    if (response.error_code == ERR_SUCCESS || response.error_code == ERR_CREATED) {
+        printf("✓ Folder '%s' created successfully!\n", foldername);
         log_info("CREATEFOLDER successful: %s", foldername);
     } else {
-        printf("Error: %s\n", response.content);
+        printf("✗ Error: %s\n", response.content);
         log_error("CREATEFOLDER failed: %s", get_error_message(response.error_code));
     }
 }
