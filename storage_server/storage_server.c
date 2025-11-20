@@ -27,11 +27,11 @@
 #include "inverted_index.h"
 
 // Configurable via command-line arguments
-static char NS_IP[MAX_IP_LEN] = "192.168.1.187";  // Name Server IP
+static char NS_IP[MAX_IP_LEN] = "127.0.0.1";  // Name Server IP (localhost for testing)
 static int NS_PORT = 8080;                         // Name Server port
 static int SS_NM_PORT = 8081;                      // Port for NS communication (inbound)
 static int SS_CLIENT_PORT = 8082;                  // Port for client communication (inbound)
-char STORAGE_DIR[MAX_PATH_LEN] = "./storage";  // Storage directory (non-static for module access)
+char STORAGE_DIR[MAX_PATH_LEN] = "./storage_server/storage";  // Storage directory (non-static for module access)
 
 // Global state
 int ns_socket = -1;             // Outbound socket to NS (for registration/heartbeat)
@@ -1100,6 +1100,21 @@ void* ns_inbound_thread(void* arg) {
             send_message(ns_conn_socket, &response);
             close_socket(ns_conn_socket);
             continue;
+        } else if (msg.operation == OP_REPLICATE) {
+            // Handle replication request (create replica of file)
+            log_info("Replication request for file '%s'", msg.filename);
+            result = create_file(msg.filename, msg.sender_id);
+            
+            // Send minimal response (async replication)
+            Message response;
+            INIT_MESSAGE(response);
+            response.operation = OP_ACK;
+            response.error_code = (result == ERR_CREATED || result == ERR_CONFLICT) ? ERR_SUCCESS : result;
+            send_message(ns_conn_socket, &response);
+            
+            log_info("Replication completed for '%s'", msg.filename);
+            close_socket(ns_conn_socket);
+            continue;
         } else {
             log_warning("Unknown operation from NS: %d", msg.operation);
             result = ERR_NOT_IMPLEMENTED;
@@ -1385,6 +1400,10 @@ int main(int argc, char* argv[]) {
     
     // Initialize inverted index for content search
     index_init(&search_index);
+    
+    // Initialize checkpoint system (BONUS)
+    checkpoint_init();
+    log_info("Checkpoint system initialized");
     
     get_local_ip(local_ip);
     log_info("Local IP: %s", local_ip);

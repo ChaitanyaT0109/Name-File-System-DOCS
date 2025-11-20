@@ -1,17 +1,3 @@
-/*
- * client/client.c
- * 
- * Client - Interactive terminal interface for Docs++ system
- * Connects to Name Server and performs file operations
- * 
- * Implemented Features:
- * - Days 3-5: CREATE, READ, DELETE operations
- * - Days 6-7: VIEW, INFO, LIST, ADDACCESS, REMACCESS commands
- * 
- * Compile: gcc -o client client.c ../common/socket_utils.c ../common/logger.c -I../common
- * Run: ./client
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,7 +8,7 @@
 #include "logger.h"
 #include "protocol.h"
 
-#define NS_IP "192.168.1.187"  // Friend's IP (where Name Server is)
+#define NS_IP "127.0.0.1"  // Localhost for testing
 #define NS_PORT 8080
 #define MAX_INPUT 1024
 
@@ -1328,9 +1314,9 @@ void cmd_checkpoint(const char* filename, const char* tag) {
         return;
     }
     
-    // Connect to SS directly
+    // Connect to SS directly using correct routing info
     int ss_socket = create_socket();
-    if (ss_socket < 0 || connect_to_server(ss_socket, response.ip_address, response.nm_port) < 0) {
+    if (ss_socket < 0 || connect_to_server(ss_socket, response.ss_ip, response.ss_port) < 0) {
         printf("Error: Failed to connect to Storage Server\n");
         if (ss_socket >= 0) close_socket(ss_socket);
         return;
@@ -1403,9 +1389,9 @@ void cmd_viewcheckpoint(const char* filename, const char* tag) {
         return;
     }
     
-    // Connect to SS
+    // Connect to SS using correct routing info
     int ss_socket = create_socket();
-    if (ss_socket < 0 || connect_to_server(ss_socket, response.ip_address, response.nm_port) < 0) {
+    if (ss_socket < 0 || connect_to_server(ss_socket, response.ss_ip, response.ss_port) < 0) {
         printf("Error: Failed to connect to Storage Server\n");
         if (ss_socket >= 0) close_socket(ss_socket);
         return;
@@ -1478,9 +1464,9 @@ void cmd_revert(const char* filename, const char* tag) {
         return;
     }
     
-    // Connect to SS
+    // Connect to SS using correct routing info
     int ss_socket = create_socket();
-    if (ss_socket < 0 || connect_to_server(ss_socket, response.ip_address, response.nm_port) < 0) {
+    if (ss_socket < 0 || connect_to_server(ss_socket, response.ss_ip, response.ss_port) < 0) {
         printf("Error: Failed to connect to Storage Server\n");
         if (ss_socket >= 0) close_socket(ss_socket);
         return;
@@ -1554,7 +1540,7 @@ void cmd_listcheckpoints(const char* filename) {
     
     // Connect to SS
     int ss_socket = create_socket();
-    if (ss_socket < 0 || connect_to_server(ss_socket, response.ip_address, response.nm_port) < 0) {
+    if (ss_socket < 0 || connect_to_server(ss_socket, response.ss_ip, response.ss_port) < 0) {
         printf("Error: Failed to connect to Storage Server\n");
         if (ss_socket >= 0) close_socket(ss_socket);
         return;

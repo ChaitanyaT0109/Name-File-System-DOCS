@@ -109,6 +109,48 @@ ClientInfo clients[MAX_CONCURRENT_CLIENTS];
 int client_count = 0;
 
 /* ============================================================================
+ * REPLICATION MAPPING (Fault Tolerance Bonus)
+ * ============================================================================ */
+
+typedef struct {
+    char filename[MAX_FILENAME_LEN];
+    int primary_ss;      // Primary storage server index
+    int replica_ss;      // Backup storage server index (-1 if none)
+} ReplicationEntry;
+
+ReplicationEntry replication_map[MAX_FILES];
+int replication_count = 0;
+
+// Find replica for a file
+int find_replica_ss(const char* filename) {
+    for (int i = 0; i < replication_count; i++) {
+        if (strcmp(replication_map[i].filename, filename) == 0) {
+            return replication_map[i].replica_ss;
+        }
+    }
+    return -1;
+}
+
+// Add replication entry
+void add_replication_entry(const char* filename, int primary, int replica) {
+    if (replication_count >= MAX_FILES) return;
+    
+    // Check if entry exists
+    for (int i = 0; i < replication_count; i++) {
+        if (strcmp(replication_map[i].filename, filename) == 0) {
+            replication_map[i].replica_ss = replica;
+            return;
+        }
+    }
+    
+    // Add new entry
+    strncpy(replication_map[replication_count].filename, filename, MAX_FILENAME_LEN - 1);
+    replication_map[replication_count].primary_ss = primary;
+    replication_map[replication_count].replica_ss = replica;
+    replication_count++;
+}
+
+/* ============================================================================
  * HELPER FUNCTIONS (Original code retained)
  * ============================================================================ */
 
@@ -380,10 +422,25 @@ void hashmap_stats() {
 int find_ss_for_file(const char* filename) {
     // Check LRU cache first
     int cached = lru_get(filename);
-    if (cached >= 0) return cached;
+    if (cached >= 0 && storage_servers[cached].base.is_alive) return cached;
     
     // Cache miss - check HashMap
     int ss_index = hashmap_find(filename);
+    
+    // Failover: If primary SS is dead, try replica
+    if (ss_index >= 0 && !storage_servers[ss_index].base.is_alive) {
+        int replica = find_replica_ss(filename);
+        if (replica >= 0 && storage_servers[replica].base.is_alive) {
+            log_info("Failover: Using replica SS[%d] for file '%s' (primary SS[%d] is down)", 
+                     replica, filename, ss_index);
+            ss_index = replica;
+        } else {
+            log_warning("File '%s' unavailable - primary SS[%d] is down and no replica available", 
+                        filename, ss_index);
+            return -1;
+        }
+    }
+    
     if (ss_index >= 0) lru_put(filename, ss_index);
     
     return ss_index;
@@ -430,6 +487,16 @@ int file_exists(const char* filename) {
     return find_ss_for_file(filename) >= 0;
 }
 
+// Helper to check if a user is registered
+int user_exists(const char* username) {
+    for (int i = 0; i < client_count; i++) {
+        if (strcmp(clients[i].username, username) == 0) {
+            return 1;  // User found
+        }
+    }
+    return 0;  // User not found
+}
+
 // Helper to mark a client as disconnected by IP and port
 void mark_client_disconnected(const char* client_ip, int client_port) {
     for (int i = 0; i < client_count; i++) {
@@ -450,6 +517,55 @@ void mark_client_disconnected(const char* client_ip, int client_port) {
  * ============================================================================ */
 
 void handle_ss_registration(int ss_socket, Message* msg) {
+    // Check if this is a reconnecting SS (recovery)
+    int existing_ss = -1;
+    for (int i = 0; i < ss_count; i++) {
+        if (strcmp(storage_servers[i].base.ip, msg->ip_address) == 0 &&
+            storage_servers[i].base.nm_port == msg->nm_port) {
+            existing_ss = i;
+            break;
+        }
+    }
+    
+    if (existing_ss >= 0) {
+        // SS Recovery: Reconnecting after failure
+        log_info("Storage Server SS[%d] reconnecting (recovery)", existing_ss);
+        storage_servers[existing_ss].base.is_alive = 1;
+        storage_servers[existing_ss].base.last_heartbeat = time(NULL);
+        storage_servers[existing_ss].base.client_port = msg->client_port;
+        
+        // Rescan files from recovered SS
+        char temp_content[MAX_CONTENT_LEN];
+        strncpy(temp_content, msg->content, MAX_CONTENT_LEN - 1);
+        temp_content[MAX_CONTENT_LEN - 1] = '\0';
+        
+        char* token = strtok(temp_content, "|");
+        int files_resynced = 0;
+        
+        while (token != NULL && files_resynced < MAX_FILES) {
+            strncpy(storage_servers[existing_ss].files[files_resynced], token, MAX_FILENAME_LEN - 1);
+            storage_servers[existing_ss].files[files_resynced][MAX_FILENAME_LEN - 1] = '\0';
+            hashmap_add(token, existing_ss);
+            files_resynced++;
+            token = strtok(NULL, "|");
+        }
+        
+        storage_servers[existing_ss].file_count = files_resynced;
+        
+        Message response;
+        INIT_MESSAGE(response);
+        response.operation = OP_ACK;
+        response.error_code = ERR_SUCCESS;
+        snprintf(response.content, sizeof(response.content), 
+                 "Storage Server recovered as SS[%d] with %d files", 
+                 existing_ss, files_resynced);
+        send_message(ss_socket, &response);
+        
+        log_info("SS[%d] recovery complete - resynced %d files", existing_ss, files_resynced);
+        return;
+    }
+    
+    // New SS registration
     if (ss_count >= MAX_STORAGE_SERVERS) {
         log_error("Maximum storage servers reached, rejecting registration");
         Message response;
@@ -685,6 +801,32 @@ void handle_create_request(int client_socket, Message* msg) {
         }
         
         log_info("File '%s' created successfully on SS[%d]", msg->filename, ss_index);
+        
+        // Replication: Find backup SS and replicate asynchronously
+        if (ss_count > 1) {
+            int replica_ss = find_available_ss();
+            if (replica_ss >= 0 && replica_ss != ss_index) {
+                add_replication_entry(msg->filename, ss_index, replica_ss);
+                log_info("Replication: File '%s' will be replicated to SS[%d]", 
+                         msg->filename, replica_ss);
+                
+                // Send async replication request (don't wait for response)
+                int rep_socket = create_socket();
+                if (rep_socket >= 0) {
+                    if (connect_to_server(rep_socket, storage_servers[replica_ss].base.ip,
+                                         storage_servers[replica_ss].base.nm_port) == 0) {
+                        Message rep_msg;
+                        INIT_MESSAGE(rep_msg);
+                        rep_msg.operation = OP_REPLICATE;
+                        strncpy(rep_msg.filename, msg->filename, MAX_FILENAME_LEN - 1);
+                        strncpy(rep_msg.sender_id, msg->sender_id, MAX_USERNAME_LEN - 1);
+                        send_message(rep_socket, &rep_msg);
+                        add_file_to_ss(replica_ss, msg->filename);
+                    }
+                    close_socket(rep_socket);
+                }
+            }
+        }
     }
     
     send_message(client_socket, &ss_response);
@@ -1122,6 +1264,17 @@ void handle_addaccess_request(int client_socket, Message* msg) {
         response.error_code = ERR_BAD_REQUEST;
         snprintf(response.content, sizeof(response.content), 
                  "Invalid username: cannot contain | or , characters");
+        send_message(client_socket, &response);
+        return;
+    }
+    
+    // Check if target user exists (is registered)
+    if (!user_exists(msg->target_user)) {
+        log_warning("User '%s' does not exist - cannot grant access", msg->target_user);
+        response.error_code = ERR_BAD_REQUEST;
+        snprintf(response.content, sizeof(response.content), 
+                 "User '%s' does not exist. User must be registered to grant access.", 
+                 msg->target_user);
         send_message(client_socket, &response);
         return;
     }
@@ -2131,8 +2284,8 @@ void* failure_detection_thread(void* arg) {
                     
                     storage_servers[i].base.is_alive = 0;
                     
-                    // TODO: Trigger failover to backup SS if replication is enabled
-                    // For now, just mark as unavailable
+                    // Failover handled automatically by find_ss_for_file()
+                    log_info("Clients will be redirected to replica SS for files on SS[%d]", i);
                 }
             }
         }
