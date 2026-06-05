@@ -14,45 +14,6 @@ The system utilizes a distributed, multi-node architecture that divides responsi
 
 **Communication Model:**
 Clients and servers communicate using a custom TCP protocol capable of sending standard HTTP-like status codes and specific command headers (`READ`, `WRITE_START`, `STREAM`, etc.).
-
-```mermaid
-graph TD
-    %% Define styles
-    classDef client fill:#3498db,stroke:#2980b9,stroke-width:2px,color:#fff,rx:5,ry:5;
-    classDef ns fill:#2ecc71,stroke:#27ae60,stroke-width:2px,color:#fff,rx:5,ry:5;
-    classDef ss fill:#e67e22,stroke:#d35400,stroke-width:2px,color:#fff,rx:5,ry:5;
-    classDef db fill:#9b59b6,stroke:#8e44ad,stroke-width:2px,color:#fff,rx:5,ry:5;
-    classDef storage fill:#34495e,stroke:#2c3e50,stroke-width:2px,color:#fff,rx:5,ry:5;
-
-    %% Nodes
-    C1[Client 1<br/>Terminal UI]:::client
-    C2[Client 2<br/>Terminal UI]:::client
-    
-    NS[Name Server<br/>Port: 8080<br/>Central Coordinator]:::ns
-    
-    SS1[Storage Server 1<br/>Ports: 8081, 8082<br/>File Hub]:::ss
-    SSN[Storage Server N<br/>Ports: 9081, 9082<br/>File Hub]:::ss
-
-    ACL[(ACL Database<br/>acl_data.db)]:::db
-    
-    FS1[(Local File Storage<br/>/storage_dir)]:::storage
-    FSN[(Local File Storage<br/>/storage_dir)]:::storage
-
-    %% Connections
-    C1 -.->|1. Authenticate & Locate File| NS
-    C2 -.->|1. Authenticate & Locate File| NS
-    
-    NS <==>|2. Registration & Routing| SS1
-    NS <==>|2. Registration & Routing| SSN
-    NS -->|Manage Permissions| ACL
-    
-    C1 ===>|3. Direct File Operations| SS1
-    C2 ===>|3. Concurrent Editing <br/> sentence-level lock| SS1
-    
-    SS1 -->|Persist Data, Checkpoints| FS1
-    SSN -->|Persist Data, Checkpoints| FSN
-```
-
 ---
 
 ## High-Level Features & Implementation
