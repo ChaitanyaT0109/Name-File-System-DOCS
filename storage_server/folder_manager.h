@@ -2,7 +2,6 @@
  * storage_server/folder_manager.h
  * 
  * Hierarchical Folder Structure Management
- * BONUS FEATURE: 10 marks
  */
 
 #ifndef FOLDER_MANAGER_H

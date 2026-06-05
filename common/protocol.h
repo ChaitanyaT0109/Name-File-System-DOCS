@@ -2,7 +2,6 @@
  * common/protocol.h
  * 
  * Protocol Design for Docs++ Distributed Document System
- * ALL TEAM MEMBERS MUST AGREE ON THIS BEFORE CODING!
  * 
  * This defines the communication protocol between:
  * - Client ↔ Name Server
@@ -362,8 +361,6 @@ static const char* get_operation_name(int operation) {
     }
 }
 
-#endif /* PROTOCOL_H */
-
 
 /* ============================================================================
  * USAGE EXAMPLES - How to use this protocol
@@ -459,8 +456,9 @@ INIT_MESSAGE(access_req);
 access_req.operation = OP_ADDACCESS;
 strcpy(access_req.sender_id, "user1");  // Owner
 strcpy(access_req.filename, "test.txt");
-strcpy(access_req.target_user, "user2"); // Grant access to user2
 access_req.access_type = ACCESS_READ;
 send_message(ns_socket, &access_req);
 
 */
+
+#endif /* PROTOCOL_H */

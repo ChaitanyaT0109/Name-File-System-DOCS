@@ -956,7 +956,7 @@ void cmd_undo(const char* filename) {
 }
 
 /* ============================================================================
- * STREAM Command Implementation (Days 12-13)
+ * STREAM Command Implementation
  * ============================================================================ */
 void cmd_stream(const char* filename) {
     if (!filename || strlen(filename) == 0) {
@@ -1076,7 +1076,7 @@ void cmd_stream(const char* filename) {
 }
 
 /* ============================================================================
- * EXEC Command Implementation (Days 12-13)
+ * EXEC Command Implementation
  * ============================================================================ */
 void cmd_exec(const char* filename) {
     if (!filename || strlen(filename) == 0) {
@@ -1140,7 +1140,7 @@ void cmd_exec(const char* filename) {
 }
 
 /* ============================================================================
- * BONUS FEATURES - Command Implementations
+ * ADDITIONAL FEATURES - Command Implementations
  * ============================================================================ */
 
 // CREATEFOLDER - Create a new folder (Bonus: Hierarchical folders)
@@ -1823,24 +1823,24 @@ void cmd_help() {
     printf("  User Management:\n");
     printf("    LIST                             - Show all registered users\n");
     printf("\n");
-    printf("  BONUS - Hierarchical Folders:\n");
+    printf("  Additional - Hierarchical Folders:\n");
     printf("    CREATEFOLDER <foldername>        - Create a new folder\n");
     printf("    MOVE <filename> <foldername>     - Move file to folder\n");
     printf("    VIEWFOLDER <foldername>          - List files in folder\n");
     printf("\n");
-    printf("  BONUS - Checkpoints:\n");
+    printf("  Additional - Checkpoints:\n");
     printf("    CHECKPOINT <file> <tag>          - Create a checkpoint\n");
     printf("    VIEWCHECKPOINT <file> <tag>      - View checkpoint content\n");
     printf("    REVERT <file> <tag>              - Revert to checkpoint\n");
     printf("    LISTCHECKPOINTS <file>           - List all checkpoints\n");
     printf("\n");
-    printf("  BONUS - Access Requests:\n");
+    printf("  Additional - Access Requests:\n");
     printf("    REQUESTACCESS <filename>         - Request access to file\n");
     printf("    VIEWREQUESTS <filename>          - View pending requests (owner)\n");
     printf("    APPROVEREQUEST <file> <user>     - Approve access request\n");
     printf("    DENYREQUEST <file> <user>        - Deny access request\n");
     printf("\n");
-    printf("  BONUS - Content Search:\n");
+    printf("  Additional - Content Search:\n");
     printf("    SEARCH <word>                    - Search for files containing word\n");
     printf("\n");
     printf("  General:\n");

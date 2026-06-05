@@ -2,7 +2,6 @@
  * common/socket_utils.c
  * 
  * Implementation of socket utility functions
- * Copy this EXACTLY into common/socket_utils.c
  */
 
 #include "socket_utils.h"

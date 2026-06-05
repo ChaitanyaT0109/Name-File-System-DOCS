@@ -2,7 +2,6 @@
  * common/logger.c
  * 
  * Implementation of logging utilities
- * Copy this EXACTLY into common/logger.c
  */
 
 #include "logger.h"

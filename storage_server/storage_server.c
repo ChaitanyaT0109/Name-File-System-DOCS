@@ -41,13 +41,13 @@ char local_ip[MAX_IP_LEN];
 
 // WRITE operation state
 LockTable lock_table;
-UndoTable undo_table;  // Changed from UndoBuffer to UndoTable
+UndoTable undo_table;
 
 // Content search index
 InvertedIndex search_index;
 
 /* ============================================================================
- * FILE OPERATIONS (Original code retained)
+ * FILE OPERATIONS
  * ============================================================================ */
 
 int ensure_storage_dir() {
@@ -753,7 +753,7 @@ void handle_stream_request(int client_socket, Message* msg) {
 }
 
 /* ============================================================================
- * REQUEST HANDLERS (Original code retained)
+ * REQUEST HANDLERS
  * ============================================================================ */
 
 void handle_read_from_client(int client_socket, Message* msg) {
@@ -790,7 +790,7 @@ void handle_read_from_client(int client_socket, Message* msg) {
 }
 
 /* ============================================================================
- * BONUS: FOLDER OPERATIONS HANDLERS
+ * FOLDER OPERATIONS HANDLERS
  * ============================================================================ */
 
 void handle_createfolder_request(int socket, Message* msg) {
@@ -868,7 +868,7 @@ void handle_viewfolder_request(int socket, Message* msg) {
 }
 
 /* ============================================================================
- * BONUS: CHECKPOINT OPERATIONS HANDLERS
+ * CHECKPOINT OPERATIONS HANDLERS
  * ============================================================================ */
 
 void handle_checkpoint_request(int socket, Message* msg) {
@@ -1396,12 +1396,12 @@ int main(int argc, char* argv[]) {
     
     // Initialize WRITE components
     lock_table_init(&lock_table);
-    undo_table_init(&undo_table);  // Changed from undo_buffer_init
+    undo_table_init(&undo_table);
     
     // Initialize inverted index for content search
     index_init(&search_index);
     
-    // Initialize checkpoint system (BONUS)
+    // Initialize checkpoint system
     checkpoint_init();
     log_info("Checkpoint system initialized");
     
@@ -1437,7 +1437,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    // FIX: Set SO_REUSEADDR
+    // Set SO_REUSEADDR
     if (setsockopt(nm_server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         log_warning("setsockopt(SO_REUSEADDR) failed for NS listener");
     }
@@ -1464,7 +1464,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // FIX: Set SO_REUSEADDR
+    // Set SO_REUSEADDR
     if (setsockopt(client_server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         log_warning("setsockopt(SO_REUSEADDR) failed for Client listener");
     }
@@ -1531,7 +1531,7 @@ int main(int argc, char* argv[]) {
     
     // Cleanup
     lock_table_destroy(&lock_table);
-    undo_table_destroy(&undo_table);  // Changed from undo_buffer_destroy
+    undo_table_destroy(&undo_table);
     close_socket(nm_server_socket);
     close_socket(client_server_socket);
     close_logger();

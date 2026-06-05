@@ -97,7 +97,7 @@ $(NS_DIR)/acl.o: $(NS_DIR)/acl.c $(NS_DIR)/acl.h $(COMMON_DIR)/protocol.h $(COMM
 	@echo "Building ACL module..."
 	$(CC) $(CFLAGS) -c $(NS_DIR)/acl.c -o $@
 
-# Access requests module for nameserver (BONUS)
+# Access requests module for nameserver
 $(NS_DIR)/access_requests.o: $(NS_DIR)/access_requests.c $(NS_DIR)/access_requests.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
 	@echo "Building access_requests module..."
 	$(CC) $(CFLAGS) -c $(NS_DIR)/access_requests.c -o $@
@@ -123,17 +123,17 @@ $(SS_DIR)/undo_buffer.o: $(SS_DIR)/undo_buffer.c $(SS_DIR)/undo_buffer.h $(COMMO
 	@echo "Building undo_buffer module..."
 	$(CC) $(CFLAGS) -c $(SS_DIR)/undo_buffer.c -o $@
 
-# Folder manager module for storage server (BONUS)
+# Folder manager module for storage server
 $(SS_DIR)/folder_manager.o: $(SS_DIR)/folder_manager.c $(SS_DIR)/folder_manager.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
 	@echo "Building folder_manager module..."
 	$(CC) $(CFLAGS) -c $(SS_DIR)/folder_manager.c -o $@
 
-# Checkpoint manager module for storage server (BONUS)
+# Checkpoint manager module for storage server
 $(SS_DIR)/checkpoint_manager.o: $(SS_DIR)/checkpoint_manager.c $(SS_DIR)/checkpoint_manager.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
 	@echo "Building checkpoint_manager module..."
 	$(CC) $(CFLAGS) -c $(SS_DIR)/checkpoint_manager.c -o $@
 
-# Inverted index module for storage server (BONUS - Content Search)
+# Inverted index module for storage server (Content Search)
 $(SS_DIR)/inverted_index.o: $(SS_DIR)/inverted_index.c $(SS_DIR)/inverted_index.h $(COMMON_DIR)/protocol.h $(COMMON_DIR)/logger.h
 	@echo "Building inverted_index module..."
 	$(CC) $(CFLAGS) -c $(SS_DIR)/inverted_index.c -o $@

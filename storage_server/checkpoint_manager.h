@@ -2,7 +2,6 @@
  * storage_server/checkpoint_manager.h
  * 
  * Checkpoint System for File Versioning
- * BONUS FEATURE: 15 marks
  */
 
 #ifndef CHECKPOINT_MANAGER_H

@@ -2,7 +2,6 @@
  * storage_server/folder_manager.c
  * 
  * Hierarchical Folder Structure Management
- * BONUS FEATURE: 10 marks
  */
 
 #include <stdio.h>

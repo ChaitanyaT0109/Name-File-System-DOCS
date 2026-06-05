@@ -70,7 +70,7 @@ typedef struct {
 HashMap file_map;
 
 /* ============================================================================
- * LRU CACHE FOR EFFICIENT SEARCH (Days 12-13 optimization)
+ * LRU CACHE FOR EFFICIENT SEARCH
  * ============================================================================ */
 
 #define LRU_CACHE_SIZE 100
@@ -99,7 +99,7 @@ LRUCache lru_cache;
 AclTable acl_table;
 
 /* ============================================================================
- * GLOBAL REGISTRY (Original code retained)
+ * GLOBAL REGISTRY
  * ============================================================================ */
 
 ExtendedSSInfo storage_servers[MAX_STORAGE_SERVERS];
@@ -151,7 +151,7 @@ void add_replication_entry(const char* filename, int primary, int replica) {
 }
 
 /* ============================================================================
- * HELPER FUNCTIONS (Original code retained)
+ * HELPER FUNCTIONS
  * ============================================================================ */
 
 void init_registries() {
@@ -192,7 +192,7 @@ void init_registries() {
 }
 
 /* ============================================================================
- * LRU CACHE IMPLEMENTATION (Days 12-13 optimization)
+ * LRU CACHE IMPLEMENTATION
  * ============================================================================ */
 
 // Move node to front (most recently used)
@@ -587,7 +587,7 @@ void handle_ss_registration(int ss_socket, Message* msg) {
     // Initialize file count before deserializing
     storage_servers[ss_index].file_count = 0;
     
-    // FIX: Process the file list sent in the content field
+    // Process the file list sent in the content field
     char temp_content[MAX_CONTENT_LEN];
     strncpy(temp_content, msg->content, MAX_CONTENT_LEN - 1);
     temp_content[MAX_CONTENT_LEN - 1] = '\0';
@@ -689,7 +689,7 @@ void handle_client_registration(int client_socket, Message* msg) {
 }
 
 /* ============================================================================
- * REQUEST HANDLERS (Original code retained)
+ * REQUEST HANDLERS
  * ============================================================================ */
 
 void handle_create_request(int client_socket, Message* msg) {
@@ -1649,7 +1649,7 @@ void handle_info_request(int client_socket, Message* msg) {
 }
 
 /* ============================================================================
- * BONUS FEATURES - Request Handlers
+ * ADDITIONAL FEATURES - Request Handlers
  * ============================================================================ */
 
 // Handle CREATEFOLDER request (Bonus: Hierarchical folders)

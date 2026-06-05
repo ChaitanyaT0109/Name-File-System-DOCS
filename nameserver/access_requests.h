@@ -1,6 +1,6 @@
 /*
  * nameserver/access_requests.h
- * BONUS: Access Request System (5 marks)
+ * Access Request System
  */
 
 #ifndef ACCESS_REQUESTS_H
